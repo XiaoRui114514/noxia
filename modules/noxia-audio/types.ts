@@ -8,6 +8,10 @@ export type AudioStep = {
   voiceId?: string;
   rate: number;
   volume: number;
+  /** Optional per-resource metadata for a single native timeline containing a playlist. */
+  resourceId?: string;
+  title?: string;
+  author?: string;
 };
 export type AudioPlan = {
   id: string;
@@ -25,6 +29,10 @@ export type AudioStatus = {
   cachedCount?: number;
   preparing?: boolean;
   error?: string;
+  resourceId?: string;
+  /** Progress inside the current contiguous resource block, in seconds. */
+  resourcePosition?: number;
+  resourceDuration?: number;
 };
 export type Subscription = { remove(): void };
 export interface AudioBackend {

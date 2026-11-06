@@ -40,6 +40,7 @@ export async function generateScript(
     throw new Error("请提供 1—30000 字资料");
   const data = await request(settings, "/chat/completions", {
     model: settings.model,
+    max_tokens: 2500,
     messages: [
       {
         role: "system",
@@ -60,4 +61,33 @@ export async function generateScript(
     usage: data.usage as
       { prompt_tokens?: number; completion_tokens?: number } | undefined,
   };
+}
+
+// Session-only memo. Nothing is stored in public configuration, sync or logs.
+const scriptCache = new Map<
+  string,
+  Awaited<ReturnType<typeof generateScript>>
+>();
+export async function generateCachedScript(
+  settings: AISettings,
+  source: string,
+  style: string,
+  prompt: string,
+  force = false,
+) {
+  const identity = JSON.stringify([
+    settings.base,
+    settings.model,
+    settings.key,
+    source,
+    style,
+    prompt,
+  ]);
+  const prior = scriptCache.get(identity);
+  if (prior && !force) return { ...prior, cached: true };
+  const result = await generateScript(settings, source, style, prompt);
+  if (scriptCache.size >= 10)
+    scriptCache.delete(scriptCache.keys().next().value!);
+  scriptCache.set(identity, result);
+  return { ...result, cached: false };
 }

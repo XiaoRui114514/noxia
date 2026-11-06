@@ -21,6 +21,9 @@ private struct Step: Decodable {
   let voiceId: String?
   let rate: Double
   let volume: Double
+  let resourceId: String?
+  let title: String?
+  let author: String?
 }
 
 private enum AudioFailure: LocalizedError {
@@ -131,6 +134,7 @@ private final class AudioEngine {
   private var observers: [NSObjectProtocol] = []
   private var remoteTargets: [(MPRemoteCommand, Any)] = []
   private var lastPersist = Date.distantPast
+  private var lastMetadataStepIndex = -1
   private let storeKey = "noxia.audio.resume.v1"
 
   init() {
@@ -293,6 +297,7 @@ private final class AudioEngine {
       plan = nextPlan
       ranges = nextRanges
       duration = cursor.seconds
+      lastMetadataStepIndex = -1
       endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
         guard let self else { return }
         if self.sleepExpired { self.finishSleep(); return }
@@ -465,15 +470,33 @@ private final class AudioEngine {
   }
 
   func status() -> [String: Any] {
-    let stepIndex = ranges.firstIndex(where: { position < $0.end }) ?? max(0, ranges.count - 1)
+    let stepIndex = currentStepIndex
+    let currentPosition = position
+    var resourceStart = 0.0
+    var resourceEnd = duration
     var result: [String: Any] = ["playing": player.rate != 0, "position": position, "duration": duration,
       "stepIndex": stepIndex, "preparing": preparing, "cachedCount": cachedCount]
     if let errorMessage { result["error"] = errorMessage }
+    if let plan, stepIndex < plan.steps.count, let resourceId = plan.steps[stepIndex].resourceId {
+      result["resourceId"] = resourceId
+      var first = stepIndex
+      var last = stepIndex
+      while first > 0 && plan.steps[first - 1].resourceId == resourceId { first -= 1 }
+      while last < plan.steps.count - 1 && plan.steps[last + 1].resourceId == resourceId { last += 1 }
+      if first < ranges.count, last < ranges.count {
+        resourceStart = ranges[first].start
+        resourceEnd = ranges[last].end
+      }
+    }
+    let resourceDuration = max(0, resourceEnd - resourceStart)
+    result["resourceDuration"] = resourceDuration
+    result["resourcePosition"] = max(0, min(resourceDuration, currentPosition - resourceStart))
     return result
   }
 
   private func tick() {
     checkSleep()
+    if currentStepIndex != lastMetadataStepIndex { updateNowPlaying() }
     if Date().timeIntervalSince(lastPersist) > 2 { persist(); updateNowPlaying() }
     emit()
   }
@@ -489,9 +512,12 @@ private final class AudioEngine {
 
   private func updateNowPlaying() {
     guard let plan else { return }
+    let index = currentStepIndex
+    let step = index < plan.steps.count ? plan.steps[index] : nil
+    lastMetadataStepIndex = index
     MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-      MPMediaItemPropertyTitle: plan.title,
-      MPMediaItemPropertyArtist: plan.author ?? "Noxia",
+      MPMediaItemPropertyTitle: step?.title ?? plan.title,
+      MPMediaItemPropertyArtist: step?.author ?? plan.author ?? "Noxia",
       MPMediaItemPropertyPlaybackDuration: duration,
       MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
       MPNowPlayingInfoPropertyPlaybackRate: player.rate,
@@ -499,6 +525,10 @@ private final class AudioEngine {
       MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
       MPNowPlayingInfoPropertyIsLiveStream: false
     ]
+  }
+
+  private var currentStepIndex: Int {
+    ranges.firstIndex(where: { position < $0.end }) ?? max(0, ranges.count - 1)
   }
 
   private func configureRemoteCommands() {
@@ -534,16 +564,19 @@ private final class AudioEngine {
   private func skipSegment(forward: Bool) {
     guard let plan, !ranges.isEmpty else { return }
     let current = ranges.firstIndex(where: { position < $0.end }) ?? ranges.count - 1
-    let segmentId = plan.steps[current].segmentId
+    func sameSegment(_ lhs: Int, _ rhs: Int) -> Bool {
+      plan.steps[lhs].segmentId == plan.steps[rhs].segmentId && plan.steps[lhs].resourceId == plan.steps[rhs].resourceId
+    }
     if forward {
-      if let index = plan.steps.indices.first(where: { $0 > current && plan.steps[$0].segmentId != segmentId }) { seek(ranges[index].start) }
+      if let index = plan.steps.indices.first(where: { $0 > current && !sameSegment($0, current) }) { seek(ranges[index].start) }
       else if plan.loop { seek(0) } else { pause(); seek(duration) }
     } else {
-      let currentStart = plan.steps.indices.first(where: { plan.steps[$0].segmentId == segmentId }) ?? current
+      var currentStart = current
+      while currentStart > 0 && sameSegment(currentStart - 1, current) { currentStart -= 1 }
       if position - ranges[currentStart].start > 3 { seek(ranges[currentStart].start); return }
       guard currentStart > 0 else { seek(0); return }
-      let previousId = plan.steps[currentStart - 1].segmentId
-      let index = plan.steps.indices.first(where: { plan.steps[$0].segmentId == previousId }) ?? 0
+      var index = currentStart - 1
+      while index > 0 && sameSegment(index - 1, currentStart - 1) { index -= 1 }
       seek(ranges[index].start)
     }
   }

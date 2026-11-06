@@ -14,7 +14,25 @@ export function createWebAudio(): AudioBackend {
   let sleepDeadline = 0;
   const listeners = new Set<(s: AudioStatus) => void>();
   const synth = () => typeof window !== 'undefined' ? window.speechSynthesis : undefined;
-  const emit = () => listeners.forEach(listener => listener({ ...status }));
+  const snapshot = (): AudioStatus => {
+    const resourceId = plan?.steps[status.stepIndex]?.resourceId;
+    let start = 0;
+    let end = status.duration;
+    if (resourceId && plan) {
+      let first = status.stepIndex;
+      let last = status.stepIndex;
+      while (first > 0 && plan.steps[first - 1].resourceId === resourceId) first--;
+      while (last < plan.steps.length - 1 && plan.steps[last + 1].resourceId === resourceId) last++;
+      start = starts[first] ?? 0;
+      end = (starts[last] ?? start) + (durations[last] ?? 0);
+    }
+    const resourceDuration = Math.max(0, end - start);
+    return {
+      ...status, resourceId, resourceDuration,
+      resourcePosition: Math.max(0, Math.min(resourceDuration, status.position - start)),
+    };
+  };
+  const emit = () => listeners.forEach(listener => listener(snapshot()));
   const cancel = () => {
     generation++;
     if (timer) clearInterval(timer);
@@ -172,7 +190,7 @@ export function createWebAudio(): AudioBackend {
     },
     setRate(value) { rate = Math.max(0.25, Math.min(2, value)); },
     setSleepTimer(seconds) { sleepDeadline = seconds > 0 ? Date.now() + seconds * 1000 : 0; },
-    getStatus() { return { ...status }; },
+    getStatus() { return snapshot(); },
     async getCacheInfo() { return { count: 0, bytes: 0 }; },
     async clearCache() {},
     addListener(_event, listener): Subscription {

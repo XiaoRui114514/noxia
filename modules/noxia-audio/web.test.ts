@@ -102,6 +102,63 @@ describe('foreground browser speech preview', () => {
     audio.stop();
   });
 
+  it('reports the current resource while a multi-resource timeline advances without JavaScript queue rebuilding', async () => {
+    const audio = createWebAudio();
+    const value = plan();
+    value.steps = value.steps.map((step, index) => ({
+      ...step,
+      resourceId: index < 2 ? 'poetry-one' : 'grammar-two',
+      title: index < 2 ? '第一篇' : '第二篇',
+      author: index < 2 ? '甲' : '乙',
+    }));
+    const resources: (string | undefined)[] = [];
+    const subscription = audio.addListener('onStatus', status => resources.push(status.resourceId));
+    await audio.prepare(value);
+    audio.play();
+    expect(audio.getStatus().resourceId).toBe('poetry-one');
+    spoken[0].onend?.();
+    expect(audio.getStatus().resourceId).toBe('poetry-one');
+    vi.advanceTimersByTime(1000);
+    expect(audio.getStatus().resourceId).toBe('grammar-two');
+    expect(resources).toContain('grammar-two');
+    audio.skipStep(0);
+    expect(audio.getStatus().resourceId).toBe('poetry-one');
+    subscription.remove();
+    audio.stop();
+  });
+
+  it('reports relative progress for the current contiguous resource block, including non-adjacent repeated resources', async () => {
+    const audio = createWebAudio();
+    const value = plan();
+    value.steps = value.steps.map((step, index) => ({ ...step, resourceId: index < 2 ? 'a' : 'b' }));
+    value.steps.push({ id: 'a-again', segmentId: 'again', resourceId: 'a', kind: 'speech', text: '再见', rate: 1, volume: 1 });
+    await audio.prepare(value);
+    expect(audio.getStatus().resourceDuration).toBe(2);
+    audio.play();
+    spoken[0].onend?.();
+    vi.advanceTimersByTime(600);
+    expect(audio.getStatus().resourcePosition).toBeCloseTo(1.6);
+    vi.advanceTimersByTime(400);
+    expect(audio.getStatus().resourceId).toBe('b');
+    expect(audio.getStatus().resourcePosition).toBe(0);
+    expect(audio.getStatus().resourceDuration).toBe(3);
+    audio.skipStep(3);
+    expect(audio.getStatus().resourceId).toBe('a');
+    expect(audio.getStatus().resourcePosition).toBe(0);
+    expect(audio.getStatus().resourceDuration).toBe(1);
+    audio.stop();
+  });
+
+  it('uses global progress as relative progress for a plan without resource metadata', async () => {
+    const audio = createWebAudio();
+    await audio.prepare(plan());
+    audio.skipStep(2);
+    const status = audio.getStatus();
+    expect(status.resourcePosition).toBe(status.position);
+    expect(status.resourceDuration).toBe(status.duration);
+    audio.stop();
+  });
+
   it('rejects an unavailable browser engine instead of simulating playback', async () => {
     vi.stubGlobal('window', {});
     const audio = createWebAudio();

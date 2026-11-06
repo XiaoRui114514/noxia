@@ -1,4 +1,4 @@
-export type ResourceKind = 'poetry' | 'grammar' | 'custom';
+export type ResourceKind = "poetry" | "grammar" | "custom";
 
 export interface Segment {
   id: string;
@@ -21,10 +21,17 @@ export interface Resource {
 }
 
 export const stepKinds = [
-  'original', 'translation', 'explanation', 'custom', 'keywords',
-  'recall', 'pause', 'nextSentence', 'nextParagraph',
+  "original",
+  "translation",
+  "explanation",
+  "custom",
+  "keywords",
+  "recall",
+  "pause",
+  "nextSentence",
+  "nextParagraph",
 ] as const;
-export type StepKind = typeof stepKinds[number];
+export type StepKind = (typeof stepKinds)[number];
 
 export interface Step {
   id: string;
@@ -42,14 +49,18 @@ export interface Step {
 export interface Template {
   id: string;
   name: string;
-  scope: 'sentence' | 'paragraph' | 'document';
+  scope: "sentence" | "paragraph" | "document";
   steps: Step[];
 }
 
 export interface AudioStep {
   id: string;
   segmentId: string;
-  kind: 'speech' | 'silence';
+  /** Cross-resource sessions retain source segment IDs and identify their owning resource here. */
+  resourceId?: string;
+  title?: string;
+  author?: string;
+  kind: "speech" | "silence";
   text?: string;
   durationMs?: number;
   voiceId?: string;

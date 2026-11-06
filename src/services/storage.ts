@@ -1,8 +1,21 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
-import type { Resource, Template } from "../core";
-export type Playlist = { id: string; name: string; resourceIds: string[] };
+import {
+  validateResource,
+  validateTemplate,
+  type Resource,
+  type Template,
+} from "../core";
+export type Playlist = {
+  id: string;
+  name: string;
+  resourceIds: string[];
+  options?: Record<
+    string,
+    { templateId?: string; voiceId?: string; rate?: number }
+  >;
+};
 export type History = {
   resourceId: string;
   title: string;
@@ -61,7 +74,15 @@ export async function setSecret(key: string, value: string) {
 }
 export async function loadLibrary(): Promise<Library> {
   const raw = await AsyncStorage.getItem("noxia.library.v1");
-  if (!raw) return emptyLibrary;
+  if (!raw)
+    return {
+      ...emptyLibrary,
+      resources: [],
+      templates: [],
+      playlists: [],
+      history: [],
+      settings: { ...defaults },
+    };
   const v = JSON.parse(raw);
   if (
     v.schema !== 1 ||
@@ -71,7 +92,43 @@ export async function loadLibrary(): Promise<Library> {
     !Array.isArray(v.history)
   )
     throw new Error("本地数据格式异常，已保留原始数据。请勿清除应用。");
-  return { ...v, settings: { ...defaults, ...v.settings } };
+  try {
+    v.resources.forEach(validateResource);
+    v.templates = v.templates.map(validateTemplate);
+    if (
+      v.playlists.some(
+        (p: Playlist) =>
+          !p ||
+          typeof p.id !== "string" ||
+          typeof p.name !== "string" ||
+          !Array.isArray(p.resourceIds) ||
+          p.resourceIds.some((id) => typeof id !== "string"),
+      )
+    )
+      throw new Error("playlists");
+    if (
+      v.history.some(
+        (h: History) =>
+          !h ||
+          typeof h.resourceId !== "string" ||
+          typeof h.title !== "string" ||
+          typeof h.date !== "string" ||
+          !Number.isFinite(h.position) ||
+          h.position < 0,
+      )
+    )
+      throw new Error("history");
+    const settings = { ...defaults };
+    for (const key of Object.keys(defaults) as (keyof Settings)[]) {
+      if (typeof v.settings?.[key] === "string")
+        (settings as Record<string, string>)[key] = v.settings[key];
+    }
+    return { ...v, settings };
+  } catch {
+    throw new Error(
+      "本地资料校验失败，已保留原始数据，未覆盖。请保留应用数据并联系维护者。",
+    );
+  }
 }
 let pending = Promise.resolve();
 export function saveLibrary(value: Library) {

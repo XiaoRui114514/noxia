@@ -40,7 +40,7 @@ for (const viewport of [
     page.on('pageerror', error => errors.push(error.message));
     await openApp(page);
     await noHorizontalOverflow(page);
-    if (viewport.name === 'iPad landscape') {
+    if (process.env.NOXIA_CAPTURE_SCREENSHOTS === '1' && viewport.name === 'iPad landscape') {
       await page.screenshot({ path: 'docs/screenshots/home-landscape.png' });
     }
     if (viewport.name === 'iPad split') {
@@ -52,7 +52,7 @@ for (const viewport of [
     }
     await expect(page.getByRole('heading', { name: '此刻，专心听。' })).toBeVisible();
     await noHorizontalOverflow(page);
-    if (viewport.screenshot) await page.screenshot({ path: `docs/screenshots/${viewport.screenshot}` });
+    if (process.env.NOXIA_CAPTURE_SCREENSHOTS === '1' && viewport.screenshot) await page.screenshot({ path: `docs/screenshots/${viewport.screenshot}` });
     await navigate(page, '我的文稿');
     await expect(page.getByRole('textbox', { name: '作品标题', exact: true })).toBeVisible();
     await noHorizontalOverflow(page);
@@ -150,4 +150,99 @@ test('foreground browser speech responds to pause, resume and sentence skip', as
   expect(result?.spoken.length).toBe(2);
   expect(result?.spoken[0]).toBe('把今天的一个知识点，讲给明天的自己。');
   expect(result?.spoken[1]).toBe('听过之后，留一点安静的时间，试着自己回想。');
+});
+
+test('a saved playlist advances across resources and updates transcript metadata in one session', async ({ page }) => {
+  await page.addInitScript(() => {
+    let utterance: SpeechSynthesisUtterance | undefined;
+    const state = {
+      spoken: [] as Array<{ text: string; rate: number }>,
+      paused: false,
+      speaking: false,
+      finish() {
+        const current = utterance;
+        utterance = undefined;
+        state.speaking = false;
+        current?.onend?.(new Event('end') as SpeechSynthesisEvent);
+      },
+    };
+    Object.defineProperty(window, '__noxiaPlaylistSpeech', { value: state });
+    Object.defineProperty(window, 'speechSynthesis', { value: {
+      get paused() { return state.paused; },
+      get speaking() { return state.speaking; },
+      getVoices: () => [{ voiceURI: 'test-zh', name: '测试系统声音', lang: 'zh-CN', localService: true, default: true }],
+      speak: (value: SpeechSynthesisUtterance) => { utterance = value; state.spoken.push({ text: value.text, rate: value.rate }); state.speaking = true; state.paused = false; },
+      cancel: () => { utterance = undefined; state.speaking = false; state.paused = false; },
+      pause: () => { state.paused = true; },
+      resume: () => { state.paused = false; },
+      addEventListener: () => {}, removeEventListener: () => {},
+    } });
+  });
+  await openApp(page);
+  await page.getByRole('button', { name: '写一段文字', exact: true }).click();
+  const materials = [
+    { title: '清晨的书页', text: '清晨，把一个问题写在书页上。' },
+    { title: '夜晚的回想', text: '夜晚，再试着回答清晨的问题。' },
+  ];
+  for (const material of materials) {
+    await page.getByRole('textbox', { name: '作品标题', exact: true }).fill(material.title);
+    await page.getByRole('textbox', { name: '输入或粘贴文字。可从 TXT / Markdown 导入。', exact: true }).fill(material.text);
+    await page.getByRole('button', { name: '保存文稿', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('已保存到本机');
+    await page.getByRole('button', { name: '清空编辑区', exact: true }).click();
+  }
+  await navigate(page, '播放列表');
+  await page.getByRole('textbox', { name: '新播放列表名称', exact: true }).fill('一天的两次回想');
+  await page.getByRole('button', { name: '创建列表', exact: true }).click();
+  for (const material of materials) {
+    await page.getByText(material.title, { exact: true }).locator('..').getByRole('button', { name: '加入', exact: true }).click();
+  }
+  await page.getByRole('button', { name: materials[1].title, exact: true }).click();
+  await page.getByRole('textbox', { name: '此篇语速倍率 0.25—2', exact: true }).fill('1.25');
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}');
+    const list = saved.playlists?.[0];
+    return { count: list?.resourceIds?.length, rate: list?.options?.[list?.resourceIds?.[1]]?.rate };
+  })).toEqual({ count: 2, rate: 1.25 });
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '今天，慢慢听。' })).toBeVisible();
+  await navigate(page, '播放列表');
+  await page.getByRole('button', { name: '一天的两次回想 (2)', exact: true }).click();
+  await page.getByRole('button', { name: materials[1].title, exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '此篇语速倍率 0.25—2', exact: true })).toHaveValue('1.25');
+  // The sidebar has the same label; the exact name selects the actual playback action.
+  await page.getByRole('button', { name: '播放列表', exact: true }).last().click();
+  await expect(page.getByRole('heading', { name: '此刻，专心听。' })).toBeVisible();
+  await expect(page.getByRole('checkbox')).toContainText(materials[0].text);
+  await expect(page.getByRole('heading', { name: '待播队列 · 1', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as Window & { __noxiaPlaylistSpeech?: { spoken: Array<{ text: string }> } }).__noxiaPlaylistSpeech?.spoken[0]?.text)).toBe(materials[0].text);
+  // Complete the speech callback, then let the real silence-step clock reach the next work.
+  // No navigation or JS preparation call is made between the two resources.
+  await page.evaluate(() => (window as Window & { __noxiaPlaylistSpeech?: { finish(): void } }).__noxiaPlaylistSpeech?.finish());
+  await expect.poll(() => page.evaluate(() => (window as Window & { __noxiaPlaylistSpeech?: { spoken: Array<{ text: string; rate: number }> } }).__noxiaPlaylistSpeech?.spoken[1]), { timeout: 7000 }).toEqual({ text: materials[1].text, rate: 1.25 });
+  await expect(page.getByRole('checkbox')).toContainText(materials[1].text);
+  await expect(page.getByRole('checkbox')).not.toContainText(materials[0].text);
+  await expect(page.getByRole('heading', { name: '待播队列 · 0', exact: true })).toBeVisible();
+  // Cover/title and transcript must agree with the resource that is actually speaking.
+  await expect(page.getByText(materials[1].title, { exact: true })).toHaveCount(2);
+  await expect(page.getByRole('button', { name: '暂停', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}');
+    return saved.history?.find((entry: { title: string }) => entry.title === '清晨的书页')?.completed;
+  })).toBe(true);
+  await page.evaluate(() => (window as Window & { __noxiaPlaylistSpeech?: { finish(): void } }).__noxiaPlaylistSpeech?.finish());
+  await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible({ timeout: 7000 });
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}');
+    return saved.history?.find((entry: { title: string }) => entry.title === '夜晚的回想')?.completed;
+  })).toBe(true);
+});
+
+
+test('sleep mode starts with a finite thirty-minute preset', async ({page})=>{
+ await openApp(page);
+ await navigate(page,'睡前听读');
+ await expect(page.getByText('当前睡眠定时：30 分钟',{exact:true})).toBeVisible();
+ await page.getByRole('button',{name:'整晚 · 手动停止',exact:true}).click();
+ await expect(page.getByText('整晚循环，需手动停止',{exact:true})).toBeVisible();
 });

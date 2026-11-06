@@ -26,7 +26,7 @@ import type {
   Voice,
 } from "./modules/noxia-audio/types";
 import {
-  compile,
+  compileSession,
   presets,
   makeStep,
   parseTemplate,
@@ -44,7 +44,7 @@ import {
   uid,
   type Library,
 } from "./src/services/storage";
-import { generateScript, listModels } from "./src/services/ai";
+import { generateCachedScript, listModels } from "./src/services/ai";
 import { login, logout, syncRequest, SyncError } from "./src/services/sync";
 import {
   listRemoteResources,
@@ -177,10 +177,13 @@ export default function App() {
   const dbRef = useRef(db),
     statusRef = useRef(status),
     activeRef = useRef(activeId),
-    templateRef = useRef(templateId),
-    queueRef = useRef(queue),
-    advanceRef = useRef<(id: string) => void>(() => {});
+    templateRef = useRef(templateId);
   const progressWidth = useRef(1);
+  const [repeatCount, setRepeatCount] = useState(1),
+    [shuffle, setShuffle] = useState(false),
+    [itemEditId, setItemEditId] = useState("");
+  const livePlanRef = useRef(plan);
+  livePlanRef.current = plan;
   const started = useRef(false),
     lastSaved = useRef(0),
     positionRestore = useRef(0),
@@ -190,7 +193,6 @@ export default function App() {
   statusRef.current = status;
   activeRef.current = activeId;
   templateRef.current = templateId;
-  queueRef.current = queue;
   const dark =
     page === "sleep" ||
     db.settings.dark === "dark" ||
@@ -224,16 +226,17 @@ export default function App() {
       setBusy("");
     }
   }
-  function persistProgress(completed = false) {
+  function persistProgress(completed = false, sample?: AudioStatus) {
+    if (!livePlanRef.current) return;
     const v = dbRef.current,
-      s = statusRef.current,
-      id = activeRef.current;
+      s = sample ?? statusRef.current,
+      id = s.resourceId ?? activeRef.current;
     const resource = v.resources.find((r) => r.id === id);
     if (!resource || s.duration === 0) return;
     const h = {
       resourceId: id,
       title: resource.title,
-      position: s.position,
+      position: s.resourcePosition ?? s.position,
       date: new Date().toISOString(),
       completed,
     };
@@ -242,7 +245,7 @@ export default function App() {
       resume: {
         resourceId: id,
         templateId: templateRef.current,
-        position: s.position,
+        position: s.resourcePosition ?? s.position,
       },
       history: [h, ...prev.history.filter((x) => x.resourceId !== id)].slice(
         0,
@@ -272,6 +275,22 @@ export default function App() {
     });
     Audio.listVoices().then(setVoices).catch(message);
     const sub = Audio.addListener("onStatus", (s) => {
+      const previous = statusRef.current;
+      if (s.resourceId && s.resourceId !== previous.resourceId) {
+        persistProgress(
+          (previous.resourceDuration ?? 0) > 0 &&
+            (previous.resourcePosition ?? 0) >=
+              (previous.resourceDuration ?? 0) - 0.35,
+          previous,
+        );
+        activeRef.current = s.resourceId;
+        setActiveId(s.resourceId);
+        setSelected([]);
+        setQueue((v) => {
+          const i = v.indexOf(s.resourceId!);
+          return i >= 0 ? v.slice(i + 1) : v;
+        });
+      }
       statusRef.current = s;
       setStatus(s);
       if (s.error) setNotice(s.error);
@@ -284,15 +303,10 @@ export default function App() {
       ) {
         started.current = false;
         persistProgress(true);
-        const rest = queueRef.current;
-        if (rest.length) {
-          setQueue(rest.slice(1));
-          advanceRef.current(rest[0]);
-        }
       }
       if (s.playing && Date.now() - lastSaved.current > 5000) {
         lastSaved.current = Date.now();
-        setTimeout(() => persistProgress(), 0);
+        persistProgress();
       }
     });
     getSecret("ai-key")
@@ -338,11 +352,17 @@ export default function App() {
     return () => globalThis.removeEventListener?.("keydown", handler);
   }, [plan]);
   function go(next: Page) {
+    if (next === "sleep") {
+      setSleep((v) => v || 30);
+      setLoop(false);
+    }
     setPage(next);
     setMobileNav(false);
     setNotice("");
   }
   function putResource(r: Resource) {
+    Audio.stop();
+    setPlan(null);
     update((v) => ({
       ...v,
       resources: [r, ...v.resources.filter((x) => x.id !== r.id)],
@@ -414,46 +434,115 @@ export default function App() {
     setBody(text);
     go("editor");
   }
+  function pronunciationMap() {
+    const values: Record<string, string> = {};
+    for (const line of dictionary.split("\n").filter(Boolean)) {
+      const [word, ...replacement] = line.split("=");
+      if (word && replacement.join("=")) values[word] = replacement.join("=");
+    }
+    return values;
+  }
+  async function playCompiled(
+    p: ReturnType<typeof compileSession>,
+    resume = false,
+    playbackRate = rate,
+  ) {
+    Audio.stop();
+    started.current = false;
+    setPlan(null);
+    livePlanRef.current = null;
+    const next = { ...p, pronunciations: pronunciationMap() };
+    const info = await Audio.prepare(next);
+    setPlan(next);
+    livePlanRef.current = next;
+    Audio.setRate(playbackRate);
+    if (resume && positionRestore.current) {
+      Audio.seek(Math.min(positionRestore.current, info.duration));
+      positionRestore.current = 0;
+    }
+    if (sleep) Audio.setSleepTimer(sleep * 60, 10);
+    Audio.play();
+    setPage("player");
+    if (p.warnings.length) setNotice(p.warnings.join("；"));
+  }
   async function start(
     resource: Resource = active,
     chosen: Template = template,
     resume = false,
     playbackRate = rate,
   ) {
-    if (!resource || !chosen) return;
+    if (busy) return;
     await task("准备本地音频 · 请保持前台", async () => {
-      Audio.stop();
-      started.current = false;
       setActiveId(resource.id);
-      const p = compile(resource, chosen, {
-        selectedIds:
-          resource.id === activeId && selected.length ? selected : undefined,
-        voiceId: db.settings.voiceId || undefined,
-        translationVoiceId: db.settings.translationVoiceId || undefined,
-      });
-      let pronunciations: Record<string, string> = {};
-      for (const line of dictionary.split("\n").filter(Boolean)) {
-        const [from, ...to] = line.split("=");
-        if (from && to.join("=")) pronunciations[from] = to.join("=");
-      }
-      const next = { ...p, loop, pronunciations };
-      setPlan(next);
-      const info = await Audio.prepare(next);
-      Audio.setRate(playbackRate);
-      if (resume && positionRestore.current) {
-        Audio.seek(Math.min(positionRestore.current, info.duration));
-        positionRestore.current = 0;
-      }
-      if (sleep) Audio.setSleepTimer(sleep * 60, 10);
-      Audio.play();
-      setPage("player");
-      if (p.warnings?.length) setNotice(p.warnings.join("；"));
+      setQueue([]);
+      const p = compileSession(
+        [
+          {
+            resource,
+            template: chosen,
+            selectedIds:
+              resource.id === activeId && selected.length
+                ? selected
+                : undefined,
+            voiceId: db.settings.voiceId || undefined,
+            translationVoiceId: db.settings.translationVoiceId || undefined,
+          },
+        ],
+        { loop, repeat: repeatCount },
+      );
+      await playCompiled(p, resume, playbackRate);
     });
   }
-  advanceRef.current = (id) => {
-    const r = dbRef.current.resources.find((x) => x.id === id);
-    if (r) void start(r);
-  };
+  async function startList(
+    ids: string[],
+    itemOptions?: Library["playlists"][number]["options"],
+  ) {
+    if (busy) return;
+    await task("准备完整播放列表 · 缓存完成后可锁屏", async () => {
+      const entries = ids.map((id) => {
+        const resource = resources.find((r) => r.id === id);
+        if (!resource) throw new Error("列表包含已删除材料，请先编辑列表");
+        const options = itemOptions?.[id];
+        return {
+          resource,
+          template:
+            allTemplates.find((t) => t.id === options?.templateId) ?? template,
+          voiceId: options?.voiceId || db.settings.voiceId || undefined,
+          translationVoiceId: db.settings.translationVoiceId || undefined,
+          rate: options?.rate ?? 1,
+        };
+      });
+      const p = compileSession(entries, { loop, repeat: repeatCount, shuffle });
+      const order = p.steps
+        .map((s) => s.resourceId!)
+        .filter((id, i, all) => i === 0 || id !== all[i - 1]);
+      setActiveId(order[0]);
+      setQueue(order.slice(1));
+      await playCompiled(p);
+    });
+  }
+  async function generate(force = false) {
+    await task(
+      force ? "重新生成 · 将调用模型接口" : "准备讲稿 · 优先复用本次会话缓存",
+      async () => {
+        const result = await generateCachedScript(
+          { base: db.settings.aiBase, model: db.settings.aiModel, key: aiKey },
+          aiSource,
+          aiStyle,
+          prompt,
+          force,
+        );
+        setAIOutput(result.text);
+        setUsage(
+          result.cached
+            ? "已复用本次会话生成结果，未调用接口"
+            : result.usage
+              ? `本次接口报告：输入 ${result.usage.prompt_tokens ?? "?"} / 输出 ${result.usage.completion_tokens ?? "?"} tokens`
+              : "接口未提供用量数据",
+        );
+      },
+    );
+  }
   function toggle() {
     if (busy) return;
     if (status.playing) {
@@ -466,10 +555,11 @@ export default function App() {
   function nextSentence(delta: number, paragraph = false) {
     if (!plan) return;
     const group = (index: number) => {
-      const id = plan.steps[index].segmentId;
-      return paragraph
-        ? (active.segments.find((s) => s.id === id)?.paragraph ?? id)
-        : id;
+      const step = plan.steps[index],
+        id = step.segmentId;
+      const resource =
+        resources.find((r) => r.id === step.resourceId) ?? active;
+      return `${step.resourceId ?? resource.id}:${paragraph ? (resource.segments.find((s) => s.id === id)?.paragraph ?? id) : id}`;
     };
     const current = group(status.stepIndex);
     let at = status.stepIndex + delta;
@@ -587,6 +677,11 @@ export default function App() {
           accessibilityRole="button"
           accessibilityLabel={`打开 ${r.title}`}
           onPress={() => {
+            if (r.id !== activeId) {
+              Audio.stop();
+              setPlan(null);
+              livePlanRef.current = null;
+            }
             setActiveId(r.id);
             setSelected([]);
             go("player");
@@ -930,6 +1025,26 @@ export default function App() {
                 ),
               )}
             </View>
+            {section("播放规则")}
+            <View style={styles.chips}>
+              <View style={{ width: 160 }}>
+                {small("整篇／列表次数 1—20")}
+                {input(
+                  String(repeatCount),
+                  (v) => setRepeatCount(Number(v)),
+                  "全篇播放次数",
+                )}
+              </View>
+              {button(
+                shuffle ? "随机顺序 · 开" : "随机顺序",
+                () => setShuffle(!shuffle),
+                shuffle,
+              )}
+            </View>
+            {button(
+              "准备当前篇与待播队列",
+              () => void startList([active.id, ...queue]),
+            )}
             {section(`待播队列 · ${queue.length}`)}
             {queue.map((id, i) => (
               <View key={`${id}-${i}`} style={styles.inline}>
@@ -942,7 +1057,7 @@ export default function App() {
               </View>
             ))}
             {small(
-              "队列在应用前台自动准备下一篇。锁屏跨篇连续队列尚未验证；单篇编排在原生层播放。",
+              "完整列表先缓存为原生时间线，跨篇无需前台切换。改变待播列表后需重新准备；后台跨篇行为仍待真机验收。",
             )}
           </View>
         </View>
@@ -1616,18 +1731,99 @@ export default function App() {
                       )}
                     </View>
                   ))}
+                  {section("单篇设置")}
+                  <View style={styles.chips}>
+                    {p.resourceIds.map((id) =>
+                      button(
+                        resources.find((r) => r.id === id)?.title ?? id,
+                        () => setItemEditId(id),
+                        itemEditId === id,
+                      ),
+                    )}
+                  </View>
+                  {p.resourceIds.includes(itemEditId) && (
+                    <View>
+                      <View style={styles.chips}>
+                        {allTemplates.map((t) =>
+                          button(
+                            t.name,
+                            () =>
+                              update((v) => ({
+                                ...v,
+                                playlists: v.playlists.map((x) =>
+                                  x.id === p.id
+                                    ? {
+                                        ...x,
+                                        options: {
+                                          ...x.options,
+                                          [itemEditId]: {
+                                            ...x.options?.[itemEditId],
+                                            templateId: t.id,
+                                          },
+                                        },
+                                      }
+                                    : x,
+                                ),
+                              })),
+                            p.options?.[itemEditId]?.templateId === t.id,
+                          ),
+                        )}
+                      </View>
+                      {input(
+                        p.options?.[itemEditId]?.voiceId ?? "",
+                        (voiceId) =>
+                          update((v) => ({
+                            ...v,
+                            playlists: v.playlists.map((x) =>
+                              x.id === p.id
+                                ? {
+                                    ...x,
+                                    options: {
+                                      ...x.options,
+                                      [itemEditId]: {
+                                        ...x.options?.[itemEditId],
+                                        voiceId,
+                                      },
+                                    },
+                                  }
+                                : x,
+                            ),
+                          })),
+                        "此篇音色 ID（留空使用默认）",
+                      )}
+                      {input(
+                        String(p.options?.[itemEditId]?.rate ?? 1),
+                        (rate) =>
+                          update((v) => ({
+                            ...v,
+                            playlists: v.playlists.map((x) =>
+                              x.id === p.id
+                                ? {
+                                    ...x,
+                                    options: {
+                                      ...x.options,
+                                      [itemEditId]: {
+                                        ...x.options?.[itemEditId],
+                                        rate: Number(rate),
+                                      },
+                                    },
+                                  }
+                                : x,
+                            ),
+                          })),
+                        "此篇语速倍率 0.25—2",
+                      )}
+                    </View>
+                  )}
                   <View style={styles.chips}>
                     {button(
                       "播放列表",
                       () => {
-                        const [first, ...rest] = p.resourceIds;
-                        const r = resources.find((x) => x.id === first);
-                        if (!r) {
+                        if (!p.resourceIds.length) {
                           setNotice("请先加入文稿");
                           return;
                         }
-                        setQueue(rest);
-                        void start(r);
+                        void startList(p.resourceIds, p.options);
                       },
                       true,
                     )}
@@ -1644,7 +1840,7 @@ export default function App() {
                 </View>
               ))}
             {small(
-              "当前每篇使用所选模板。跨篇后台自动准备、逐条独立音色、随机播放尚未完成。",
+              "整个列表一次准备，支持随机顺序、有限次数和循环。每篇可独立设置编排、原文音色与语速。实际后台连续播放仍需 iPad 验收。",
             )}
           </>
         );
@@ -1707,29 +1903,8 @@ export default function App() {
               true,
             )}
             <View style={styles.chips}>
-              {button(
-                "生成讲稿",
-                () =>
-                  void task("生成中 · 本次会调用你的模型接口", async () => {
-                    const result = await generateScript(
-                      {
-                        base: db.settings.aiBase,
-                        model: db.settings.aiModel,
-                        key: aiKey,
-                      },
-                      aiSource,
-                      aiStyle,
-                      prompt,
-                    );
-                    setAIOutput(result.text);
-                    setUsage(
-                      result.usage
-                        ? `本次接口报告：输入 ${result.usage.prompt_tokens ?? "?"} / 输出 ${result.usage.completion_tokens ?? "?"} tokens`
-                        : "接口未提供用量数据",
-                    );
-                  }),
-                true,
-              )}
+              {button("生成讲稿", () => void generate(), true)}
+              {button("重新生成（调用接口）", () => void generate(true))}
               {button("配置模型", () => go("settings"))}
             </View>
             {small(
@@ -1767,6 +1942,8 @@ export default function App() {
               },
               true,
             )}
+            {section("已保存的生成讲稿")}
+            {resources.filter((r) => r.generated).map(row)}
           </>
         );
       case "sleep":
@@ -1808,6 +1985,9 @@ export default function App() {
                 ),
               )}
             </View>
+            {small(
+              sleep ? `当前睡眠定时：${sleep} 分钟` : "整晚循环，需手动停止",
+            )}
             {button(
               "开始睡前听读",
               () => {
@@ -1939,6 +2119,10 @@ export default function App() {
                 account ? `已登录 ${account}` : "登录",
                 () =>
                   void task("登录移动网关", async () => {
+                    if (Platform.OS === "web")
+                      throw new Error(
+                        "统一账号登录仅支持原生应用；Web 预览不会发送密码。",
+                      );
                     if (!db.settings.syncBase)
                       throw new Error(
                         "尚未配置网关。请按 docs/cloudflare.md 部署并完成兼容性验证。",
@@ -2207,6 +2391,12 @@ export default function App() {
               {busy !== "" && (
                 <View style={[styles.inline, { marginBottom: 20 }]}>
                   <ActivityIndicator color={c.accent} />
+                  {/本地音频|完整播放列表/.test(busy) &&
+                    button("停止准备", () => {
+                      Audio.stop();
+                      setPlan(null);
+                      livePlanRef.current = null;
+                    })}
                   <Text style={{ color: c.muted, flex: 1 }}>{busy}</Text>
                 </View>
               )}

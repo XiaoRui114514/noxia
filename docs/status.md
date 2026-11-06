@@ -9,8 +9,8 @@
 - Linux / Node 24.22.1 / npm 11.9.0；GitHub 身份 XiaoRui114514 可用；无 Xcode、Swift、Apple 签名、Expo 或 Cloudflare 已配置凭据。
 - Expo SDK 58.0.23 / RN 0.88.1 官方当前 blank-typescript 模板初始化，`expo install --check` 兼容检查通过。
 - `tsc --noEmit`、核心／资源／Web 音频／客户端服务 Vitest 与独立后端测试。
-- 编排19项、资源7项、Web音频6项、AI与同步客户端17项；后端15项。实际最终计数以本仓库测试输出为准。
-- Chromium E2E 8项：1194×834、744×1133、507×768、390×844；文稿与双语单元保存刷新、模板编辑保存、未接受许可不请求资源、深色持久化、前台语音控制。语音测试桩不证明声音或后台质量。
+- 编排及跨篇会话30项、资源7项、Web音频9项、AI与同步客户端17项；后端15项。实际最终计数以本仓库测试输出为准。
+- Chromium E2E 10项：1194×834、744×1133、507×768、390×844；文稿与双语单元保存刷新、模板编辑保存、未接受许可不请求资源、深色持久化、前台语音控制，以及跨篇列表／单篇语速持久化、标题与正文切换、两篇自然完成记录及睡前模式默认30分钟／手动整晚切换。语音测试桩不证明声音或后台质量。
 - `expo export --platform web` 完整 JS 导出通过；`expo prebuild --platform ios --no-install` 生成 iOS 项目通过；Apple autolinking 发现 NoxiaAudioModule。预生成原生目录按 Expo 流程忽略，不提交。
 - 后端 15 项测试使用 Node 内存 SQLite，Wrangler dry-run 可打包；无真实账号、D1 或 Service Binding 访问。
 - 依赖审计已修正 glob/minimatch 构建依赖，`npm audit` 根包和后端均 0 已知漏洞。静态凭据及私人文件扫描通过；不代表没有未知漏洞。
@@ -27,8 +27,14 @@ Cloudflare 门禁：备份可恢复、staging 兼容旧站点、用户审批具�
 
 ## 继续开发
 
-1. 修复原生云编译中发现的问题，再由真实 iPad 完成音频验收。
-2. 将多篇列表一次性准备到原生队列，完成后台跨篇、独立条目模板、随机与有限全篇重复。
-3. 本地数据库迁移、备份导出、缓存配额；AI生成历史与去重缓存、更多TTS provider。
+1. 建立目标空仓库后运行原生云编译，修复发现的问题，再由真实 iPad 完成音频验收。
+2. 已将多篇列表、独立模板／音色／语速、随机与有限重复编译成完整原生时间线；继续验证后台跨篇，并补完整会话恢复与后台历史日志。
+3. 本地数据库迁移、备份导出、缓存配额；更完整的AI生成历史与持久去重缓存、更多TTS provider。
 4. 按已审查流程部署移动账号扩展，完成按账号分区的同步状态、全类型双向同步、冲突界面和自动重试。
 5. PDF文本提取、真正多窗口scene、iPad外接键盘快捷键、可选端侧TTS、Android原生播放器。
+
+## GitHub 实际阻碍
+
+本地 Git 已提交自主代码，使用 GitHub noreply 作者地址。当前 GitHub App 有 contents/actions/workflows write，但不具备创建仓库权限。GraphQL createRepository 与 REST POST /user/repos 均返回 Resource not accessible by integration（403）。尚未创建 public 仓库、未推送、未执行 GitHub Actions；需要用户在 GitHub 创建 Public 空仓库 XiaoRui114514/noxia 后继续。没有对其他仓库推送或改动。
+
+最终本地检查：`npm ci` 可重现、63项应用单测和15项后端单测通过，完整9项原有E2E通过，新增睡前默认定时另项检查；iOS Hermes JS 导出成功（不是Swift编译）。GitHub创建两种API均被权限拒绝，无远程Actions结果。
