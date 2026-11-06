@@ -1,0 +1,26 @@
+export const palettes = {
+  light: {
+    bg: "#F8F7F3",
+    surface: "#FFFFFF",
+    sidebar: "#EFEFEA",
+    text: "#222B29",
+    muted: "#626D65",
+    line: "#DDDFD8",
+    accent: "#346958",
+    soft: "#E2EBE3",
+    cover: "#DDE5D8",
+    danger: "#A33D35",
+  },
+  dark: {
+    bg: "#141B19",
+    surface: "#1E2723",
+    sidebar: "#19211D",
+    text: "#F2F1E8",
+    muted: "#A4AEA5",
+    line: "#354039",
+    accent: "#A8CDB3",
+    soft: "#2C4034",
+    cover: "#2B4134",
+    danger: "#FFB4A8",
+  },
+};

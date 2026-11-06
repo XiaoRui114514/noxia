@@ -1,0 +1,13 @@
+{
+  "name": "noxia-mobile-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "vitest": "^5.1.0",
+    "wrangler": "^4.0.0"
+  }
+}

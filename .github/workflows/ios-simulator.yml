@@ -1,0 +1,76 @@
+name: Build iPad simulator
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-simulator-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ios-simulator:
+    # Standard GitHub-hosted macOS runner. No EAS subscription or Apple signing credentials.
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Inspect Apple toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          pod --version
+          python3 - <<'PY'
+          import re, subprocess
+          xcode = subprocess.check_output(['xcodebuild', '-version'], text=True)
+          version = tuple(map(int, re.search(r'Xcode (\d+)\.(\d+)', xcode).groups()))
+          assert version >= (16, 1), 'React Native 0.88.1 requires Xcode >= 16.1'
+          swift = subprocess.check_output(['xcrun', 'swift', '--version'], text=True)
+          assert int(re.search(r'Swift version (\d+)', swift).group(1)) >= 6, 'Expo SDK 58 requires a Swift 6 toolchain'
+          PY
+      - run: npm ci
+      - name: Generate iOS project
+        run: npx expo prebuild --platform ios --no-install
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: |
+          set -o pipefail
+          pod install 2>&1 | tee ../pod-install.log
+      - name: Verify workspace and scheme
+        run: xcodebuild -list -workspace ios/Noxia.xcworkspace
+      - name: Compile unsigned iPad simulator app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/Noxia.xcworkspace \
+            -scheme Noxia \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios-simulator \
+            -resultBundlePath build/Noxia-Simulator.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee xcodebuild.log
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-simulator-diagnostics
+          path: |
+            pod-install.log
+            xcodebuild.log
+            build/Noxia-Simulator.xcresult
+          retention-days: 7
+          if-no-files-found: ignore
+# This job verifies native compilation only. It cannot verify physical-device background audio,
+# lock-screen controls, interruptions, signing, installation on iPad, or App Store eligibility.

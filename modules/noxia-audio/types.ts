@@ -1,0 +1,45 @@
+export type Voice = { id: string; name: string; language: string; quality: string };
+export type AudioStep = {
+  id: string;
+  segmentId: string;
+  kind: 'speech' | 'silence';
+  text?: string;
+  durationMs?: number;
+  voiceId?: string;
+  rate: number;
+  volume: number;
+};
+export type AudioPlan = {
+  id: string;
+  title: string;
+  author?: string;
+  steps: AudioStep[];
+  loop: boolean;
+  pronunciations?: Record<string, string>;
+};
+export type AudioStatus = {
+  playing: boolean;
+  position: number;
+  duration: number;
+  stepIndex: number;
+  cachedCount?: number;
+  preparing?: boolean;
+  error?: string;
+};
+export type Subscription = { remove(): void };
+export interface AudioBackend {
+  listVoices(): Promise<Voice[]>;
+  prepare(plan: AudioPlan): Promise<{ duration: number }>;
+  play(): void;
+  pause(): void;
+  stop(): void;
+  seek(seconds: number): void;
+  /** Seek to a prepared timeline step (not a text-character offset). */
+  skipStep(index: number): void;
+  setRate(rate: number): void;
+  setSleepTimer(seconds: number, fadeSeconds: number): void;
+  getStatus(): AudioStatus;
+  getCacheInfo(): Promise<{ count: number; bytes: number }>;
+  clearCache(): Promise<void>;
+  addListener(event: 'onStatus', listener: (status: AudioStatus) => void): Subscription;
+}

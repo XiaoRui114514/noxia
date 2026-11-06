@@ -1,0 +1,13 @@
+{
+  "name": "noxia-mobile-gateway",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "MOBILE_RELEASE_VERIFIED": "false" },
+  // Replace only in a private deployment configuration, after backup and approval.
+  // Do not enable a public route on the existing learning-account-sync Worker.
+  "services": [{ "binding": "IDENTITY", "service": "learning-account-sync" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "noxia-data", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  "triggers": { "crons": ["23 3 * * *"] }
+}
