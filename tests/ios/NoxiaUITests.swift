@@ -49,7 +49,7 @@ final class NoxiaUITests: XCTestCase {
     // The mini player sits below the editor, outside its ScrollView. Dismiss an
     // onscreen keyboard by an unhandled header tap before asking XCTest to tap it.
     if app.keyboards.firstMatch.exists {
-      let heading = app.staticTexts["我的文稿"].lastMatch
+      let heading = app.staticTexts["文稿"].lastMatch
       guard heading.exists, heading.isHittable else { throw ScenarioFailure.failed("Editor header is unavailable for keyboard dismissal.") }
       heading.tap()
       let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !app.keyboards.firstMatch.exists }, object: app)

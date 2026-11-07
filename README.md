@@ -34,7 +34,7 @@
 
 请用自己的签名方式签名后安装。构建不使用 Apple ID、证书或签名服务凭据。产物默认保留 7 天，过期可手动 Run workflow 重新生成。
 
-最低 iOS / iPadOS 16.4。模拟器 ZIP 的 SDK 平台不同，不能给实体设备安装。0.1 已实际完成真机目标构建；0.2 以 [Actions](https://github.com/XiaoRui114514/noxia/actions) 最新结果为准。构建成功不等于实体设备播放验收完成。
+最低 iOS / iPadOS 16.4。模拟器 ZIP 的 SDK 平台不同，不能给实体设备安装。0.2 已通过 [真机目标构建](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176)，[下载产物](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176/artifacts/13572728313)（保留 7 天）。构建成功不等于实体设备播放验收完成。
 
 可选的 EAS 签名分发通常需要 Apple Developer Program；TestFlight 还需要 App Store Connect。用户已有签名方式时直接使用上述 IPA，无需先配置 EAS。
 
