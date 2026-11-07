@@ -2,6 +2,8 @@
 
 ## 当前阶段
 
+2026-11-07 继续：用户已创建私人仓库 `XiaoRui114514/noxia`，保持私有并准备推送、运行现有 GitHub Actions；不会修改可见性或付费设置。
+
 0.1 开发版：实际代码、可运行 Web 版、原生系统语音模块、云端账号扩展与测试已完成第一轮集成。**尚未交付可安装的签名 iPad 应用，不满足整体验收。**
 
 ## 本地实际验证
@@ -35,6 +37,6 @@ Cloudflare 门禁：备份可恢复、staging 兼容旧站点、用户审批具�
 
 ## GitHub 实际阻碍
 
-本地 Git 已提交自主代码，使用 GitHub noreply 作者地址。当前 GitHub App 有 contents/actions/workflows write，但不具备创建仓库权限。GraphQL createRepository 与 REST POST /user/repos 均返回 Resource not accessible by integration（403）。尚未创建 public 仓库、未推送、未执行 GitHub Actions；需要用户在 GitHub 创建 Public 空仓库 XiaoRui114514/noxia 后继续。没有对其他仓库推送或改动。
+本地 Git 已提交自主代码，使用 GitHub noreply 作者地址。当前 GitHub App 有 contents/actions/workflows write，但不具备创建仓库权限。GraphQL createRepository 与 REST POST /user/repos 均返回 Resource not accessible by integration（403）。上轮未创建仓库、未推送或执行 GitHub Actions。2026-11-07 用户已创建私有空仓库，该创建权限阻碍已解除；本轮继续推送。没有对其他仓库推送或改动。
 
 最终本地检查：`npm ci` 可重现、63项应用单测和15项后端单测通过，完整9项原有E2E通过，新增睡前默认定时另项检查；iOS Hermes JS 导出成功（不是Swift编译）。GitHub创建两种API均被权限拒绝，无远程Actions结果。
