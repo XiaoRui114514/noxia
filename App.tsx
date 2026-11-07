@@ -1,5 +1,7 @@
+import { version } from "./package.json";
 import React, { useEffect, useRef, useState } from "react";
 import {
+  AppState,
   AccessibilityInfo,
   ActivityIndicator,
   Animated,
@@ -28,24 +30,38 @@ import type {
 import {
   compileSession,
   presets,
-  makeStep,
   parseTemplate,
-  exportTemplate,
   type Resource,
   type Template,
-  type Step,
+  validateResource,
 } from "./src/core";
 import {
   emptyLibrary,
-  getSecret,
   loadLibrary,
   saveLibrary,
-  setSecret,
   uid,
   type Library,
+  validatePronunciations,
+  flushLibrary,
 } from "./src/services/storage";
+import { fingerprint, resumePosition } from "./src/core/resume";
+import { editResource, resourceBody } from "./src/core/editor";
+import { useTasks } from "./src/services/useTasks";
+import { PlayerPage } from "./src/ui/PlayerPage";
+import { TemplatePage } from "./src/ui/TemplatePage";
+import { SegmentEditor } from "./src/ui/SegmentEditor";
+import { ReviewPage } from "./src/ui/ReviewPage";
+import { AccountPanel } from "./src/ui/AccountPanel";
+import { DataPanel } from "./src/ui/DataPanel";
 import { generateCachedScript } from "./src/services/ai";
-import { login, logout, syncRequest, SyncError } from "./src/services/sync";
+import {
+  login,
+  logout,
+  syncRequest,
+  SyncError,
+  createSyncBatch,
+  readAllTemplates,
+} from "./src/services/sync";
 import {
   listRemoteResources,
   loadRemoteResource,
@@ -91,6 +107,7 @@ const SAMPLE: Resource = {
   ],
 };
 type Page =
+  | "review"
   | "home"
   | "library"
   | "editor"
@@ -109,6 +126,7 @@ const nav: {
   icon: React.ComponentProps<typeof Ionicons>["name"];
 }[] = [
   { id: "home", label: "现在听", icon: "sunny-outline" },
+  { id: "review", label: "复习", icon: "checkmark-circle-outline" },
   { id: "library", label: "资源", icon: "library-outline" },
   { id: "playlists", label: "播放列表", icon: "list-outline" },
   { id: "editor", label: "文稿", icon: "create-outline" },
@@ -120,17 +138,6 @@ const nav: {
   { id: "sleep", label: "睡前", icon: "moon-outline" },
   { id: "settings", label: "设置", icon: "settings-outline" },
 ];
-const labels: Record<string, string> = {
-  original: "原文",
-  translation: "翻译",
-  explanation: "解释",
-  custom: "自定义文字",
-  keywords: "关键词",
-  recall: "留白自背",
-  pause: "静音停顿",
-  nextSentence: "下一句",
-  nextParagraph: "下一段",
-};
 const clock = (seconds: number) =>
   `${Math.floor(Math.max(0, seconds) / 60)}:${String(Math.floor(Math.max(0, seconds) % 60)).padStart(2, "0")}`;
 export default function App() {
@@ -140,11 +147,10 @@ export default function App() {
     [loaded, setLoaded] = useState(false),
     [storageOK, setStorageOK] = useState(false);
   const [page, setPage] = useState<Page>("home"),
-    [notice, setNotice] = useState(""),
-    [busy, setBusy] = useState("");
+    [notice, setNotice] = useState("");
   const [activeId, setActiveId] = useState("welcome"),
     [templateId, setTemplateId] = useState(""),
-    [selected, setSelected] = useState<string[]>([]),
+    [selected, setSelected] = useState<string[] | undefined>(undefined),
     [loop, setLoop] = useState(false),
     [rate, setRate] = useState(1),
     [sleep, setSleep] = useState(0);
@@ -157,6 +163,15 @@ export default function App() {
     [plan, setPlan] = useState<AudioPlan | null>(null),
     [voices, setVoices] = useState<Voice[]>([]),
     [cache, setCache] = useState({ count: 0, bytes: 0 });
+  const [structured, setStructured] = useState(false),
+    [listLimit, setListLimit] = useState(40);
+  const [editorSnapshot, setEditorSnapshot] = useState({
+      id: "",
+      title: "",
+      body: "",
+    }),
+    [saveState, setSaveState] = useState("已保存");
+  const saveEpoch = useRef(0);
   const [editId, setEditId] = useState(""),
     [title, setTitle] = useState(""),
     [body, setBody] = useState("");
@@ -171,33 +186,58 @@ export default function App() {
     [aiSource, setAISource] = useState(""),
     [aiOutput, setAIOutput] = useState(""),
     [usage, setUsage] = useState("");
-  const [username, setUsername] = useState(""),
-    [password, setPassword] = useState(""),
-    [account, setAccount] = useState(""),
+  const [account, setAccount] = useState(""),
     [playlistName, setPlaylistName] = useState(""),
     [playlistId, setPlaylistId] = useState("");
   const [queue, setQueue] = useState<string[]>([]),
     [deadline, setDeadline] = useState(""),
     [dictionary, setDictionary] = useState("");
-  const [showTranscript, setShowTranscript] = useState(true);
-  const transcriptRef = useRef<React.ComponentRef<typeof ScrollView>>(null),
-    transcriptOffsets = useRef<Record<string, number>>({});
+  const [stopAt, setStopAt] = useState<number | null>(null);
+  const sourcePlan = useRef<AudioPlan | null>(null),
+    contextRef = useRef("");
+  const sessionMeta = useRef<{ selectedIds?: string[]; rate: number; templateId?:string }>({
+    rate: 1,
+  });
+  sessionMeta.current.rate=rate;
+  const aiJob = useRef<{ id: number; controller: AbortController } | null>(
+      null,
+    ),
+    aiEpoch = useRef(0),
+    aiRevision = useRef(0);
+  const [aiRunning, setAIRunning] = useState(false);
+  const [preparation, setPreparation] = useState<{
+      done: number;
+      total: number;
+      cached: number;
+      failedIds: string[];
+    } | null>(null),
+    [confirmCache, setConfirmCache] = useState(false);
+  const [dictionaryState, setDictionaryState] = useState("");
+  const pageScroll = useRef<React.ComponentRef<typeof ScrollView>>(null);
+  const syncBatch = useRef<Awaited<ReturnType<typeof createSyncBatch>> | null>(
+    null,
+  );
+  const syncPreview = useRef<Awaited<
+    ReturnType<typeof createSyncBatch>
+  > | null>(null);
   const [syncConflict, setSyncConflict] = useState<unknown>(null);
   const dbRef = useRef(db),
     statusRef = useRef(status),
     activeRef = useRef(activeId),
     templateRef = useRef(templateId);
-  const progressWidth = useRef(1);
+  const storageReady = useRef(storageOK);
+  storageReady.current = storageOK;
   const [repeatCount, setRepeatCount] = useState(1),
     [shuffle, setShuffle] = useState(false),
     [itemEditId, setItemEditId] = useState("");
+  const toggleAction = useRef<() => void>(() => {});
+  toggleAction.current = toggle;
   const livePlanRef = useRef(plan);
   livePlanRef.current = plan;
   const started = useRef(false),
     lastSaved = useRef(0),
-    positionRestore = useRef(0),
     fade = useRef(new Animated.Value(1)).current,
-    reduceMotion = useRef(false);
+    reduceMotion = useRef(true);
   dbRef.current = db;
   statusRef.current = status;
   activeRef.current = activeId;
@@ -215,7 +255,10 @@ export default function App() {
   const template =
     allTemplates.find((t) => t.id === templateId) ?? allTemplates[0];
   function update(fn: (prev: Library) => Library) {
-    setDb((v) => fn(v));
+    const value = fn(dbRef.current);
+    dbRef.current = value;
+    setDb(value);
+    return value;
   }
   function settings(p: Partial<Library["settings"]>) {
     update((v) => ({ ...v, settings: { ...v.settings, ...p } }));
@@ -235,16 +278,16 @@ export default function App() {
   function message(error: unknown) {
     setNotice(error instanceof Error ? error.message : String(error));
   }
-  async function task(label: string, fn: () => Promise<void>) {
-    setBusy(label);
-    setNotice("");
-    try {
-      await fn();
-    } catch (e) {
-      message(e);
-    } finally {
-      setBusy("");
-    }
+  const { task, tasks } = useTasks(message);
+  const audioBusy = tasks.some((x) => /准备|试听/.test(x));
+  function playbackContext(value = dbRef.current) {
+    return fingerprint([
+      value.resources,
+      value.templates,
+      value.settings.voiceId,
+      value.settings.translationVoiceId,
+      value.pronunciations,
+    ]);
   }
   function persistProgress(completed = false, sample?: AudioStatus) {
     if (!livePlanRef.current) return;
@@ -260,18 +303,26 @@ export default function App() {
       date: new Date().toISOString(),
       completed,
     };
-    setDb((prev) => ({
+    const value = update((prev) => ({
       ...prev,
       resume: {
         resourceId: id,
-        templateId: templateRef.current,
-        position: s.resourcePosition ?? s.position,
+        templateId: sessionMeta.current.templateId??templateRef.current,
+        position: s.position,
+        planId: sourcePlan.current?.id,
+        stepId: livePlanRef.current?.steps[s.stepIndex]?.id,
+        stepIndex: s.stepIndex,
+        sourcePlan: sourcePlan.current ?? undefined,
+        context: contextRef.current,
+        selectedIds: sessionMeta.current.selectedIds,
+        rate: sessionMeta.current.rate,
       },
       history: [h, ...prev.history.filter((x) => x.resourceId !== id)].slice(
         0,
         200,
       ),
     }));
+    if (storageReady.current) void saveLibrary(value).catch(message);
   }
   useEffect(() => {
     AccessibilityInfo.isReduceMotionEnabled().then(
@@ -282,19 +333,60 @@ export default function App() {
       (v) => (reduceMotion.current = v),
     );
     task("打开资料", async () => {
-      const data = await loadLibrary();
-      if (!data.resources.length) data.resources = [SAMPLE];
+      let data: Library;
+      try {
+        data = await loadLibrary();
+      } catch (e) {
+        setLoaded(true);
+        setPage("settings");
+        throw e;
+      }
+      if (
+        !data.resources.length &&
+        !data.trash?.length &&
+        !data.quarantine?.length
+      )
+        data.resources = [SAMPLE];
       setDb(data);
       setStorageOK(true);
       if (data.resume) {
         setActiveId(data.resume.resourceId);
         setTemplateId(data.resume.templateId);
-        positionRestore.current = data.resume.position;
+        setSelected(data.resume.selectedIds);
+        setRate(data.resume.rate ?? 1);
       }
+      if (data.timer?.mode === "absolute") setStopAt(data.timer.at);
+      else if (data.timer?.mode === "relative") setSleep(data.timer.minutes);
+      if (data.editorDraft) {
+        setEditId(data.editorDraft.id);
+        setTitle(data.editorDraft.title);
+        setBody(data.editorDraft.body);
+        const r = data.resources.find((r) => r.id === data.editorDraft?.id);
+        setEditorSnapshot({
+          id: r?.id ?? "",
+          title: r?.title ?? "",
+          body: r ? resourceBody(r) : "",
+        });
+      }
+      setAIOutput(data.scriptDraft ?? "");
+      setDictionary(
+        Object.entries(data.pronunciations?.global ?? {})
+          .map(([a, b]) => `${a}=${b}`)
+          .join("\n"),
+      );
+      if (data.quarantine?.length)
+        setNotice(
+          `已隔离 ${data.quarantine.length} 条异常；请在设置中备份或修复。`,
+        );
       setLoaded(true);
     });
     Audio.listVoices().then(setVoices).catch(message);
+    Audio.getCacheInfo().then(setCache).catch(message);
     const sub = Audio.addListener("onStatus", (s) => {
+      if (s.preparing) {
+        setStatus(s);
+        return;
+      }
       const previous = statusRef.current;
       if (s.resourceId && s.resourceId !== previous.resourceId) {
         persistProgress(
@@ -305,7 +397,7 @@ export default function App() {
         );
         activeRef.current = s.resourceId;
         setActiveId(s.resourceId);
-        setSelected([]);
+        setSelected(undefined);
         setQueue((v) => {
           const i = v.indexOf(s.resourceId!);
           return i >= 0 ? v.slice(i + 1) : v;
@@ -335,6 +427,10 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
+    if (page === "audio")
+      void Audio.getCacheInfo().then(setCache).catch(message);
+  }, [page]);
+  useEffect(() => {
     if (!loaded || !isAccountConfigured()) return;
     let active = true;
     void syncRequest(ACCOUNT_API, "/v1/auth/me")
@@ -348,8 +444,43 @@ export default function App() {
     };
   }, [loaded]);
   useEffect(() => {
-    if (loaded && storageOK) saveLibrary(db).catch(message);
+    if (loaded && storageOK) {
+      const epoch = ++saveEpoch.current;
+      setSaveState("保存中…");
+      void saveLibrary(db)
+        .then(() => {
+          if (epoch === saveEpoch.current) setSaveState("已保存");
+        })
+        .catch((e) => {
+          if (epoch === saveEpoch.current) setSaveState("保存失败");
+          message(e);
+        });
+    }
   }, [db, loaded, storageOK]);
+  useEffect(() => {
+    const save = () => {
+      persistProgress();
+      void flushLibrary().catch(message);
+    };
+    const sub = AppState.addEventListener("change", (value) => {
+      if (value !== "active") save();
+    });
+    if (Platform.OS === "web") globalThis.addEventListener("pagehide", save);
+    return () => {
+      sub.remove();
+      if (Platform.OS === "web")
+        globalThis.removeEventListener("pagehide", save);
+    };
+  }, []);
+  useEffect(() => {
+    if (loaded && storageOK)
+      update((v) => ({
+        ...v,
+        timer: stopAt
+          ? { mode: "absolute", at: stopAt }
+          : { mode: "relative", minutes: sleep },
+      }));
+  }, [stopAt, sleep, loaded, storageOK]);
   useEffect(() => {
     if (!reduceMotion.current) {
       fade.setValue(0.35);
@@ -363,7 +494,10 @@ export default function App() {
   useEffect(() => {
     if (Platform.OS !== "web") return;
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
+      if (e.defaultPrevented) return;
+      const target = e.target as HTMLElement;
+      if (target?.closest('[role="dialog"],[aria-modal="true"]')) return;
+      const tag = target?.tagName;
       if (
         tag === "INPUT" ||
         tag === "TEXTAREA" ||
@@ -371,8 +505,14 @@ export default function App() {
       )
         return;
       if (e.code === "Space") {
+        if (
+          target?.closest(
+            'button,[role="button"],[role="tab"],[role="checkbox"]',
+          )
+        )
+          return;
         e.preventDefault();
-        toggle();
+        toggleAction.current();
       }
       if (e.code === "ArrowRight") Audio.seek(statusRef.current.position + 10);
       if (e.code === "ArrowLeft")
@@ -381,25 +521,88 @@ export default function App() {
     globalThis.addEventListener?.("keydown", handler);
     return () => globalThis.removeEventListener?.("keydown", handler);
   }, [plan]);
+  useEffect(() => {
+    if (loaded && storageOK && page === "editor")
+      update((v) => ({ ...v, editorDraft: { id: editId, title, body } }));
+  }, [editId, title, body, page, loaded, storageOK]);
+  const editorDirty =
+    title !== editorSnapshot.title ||
+    body !== editorSnapshot.body ||
+    editId !== editorSnapshot.id;
   function go(next: Page) {
+    if (!loaded) return;
+    if (!storageOK && next !== "settings") {
+      setNotice("请先备份并恢复资料库");
+      return;
+    }
+    pageScroll.current?.scrollTo({ y: 0, animated: false });
     if (next === "sleep") {
-      setSleep((v) => v || 30);
+      if (!stopAt) setSleep((v) => v || 30);
       setLoop(false);
     }
     setPage(next);
     setNotice("");
   }
-  function putResource(r: Resource) {
+  function putResource(input: Resource) {
+    if (!storageOK) throw new Error("请先在设置中备份并恢复资料库，再保存内容");
+    const r = validateResource(input);
     stopAudio();
     setPlan(null);
-    update((v) => ({
+    const value = update((v) => ({
       ...v,
       resources: [r, ...v.resources.filter((x) => x.id !== r.id)],
+      resume: undefined,
+      reviews: (v.reviews ?? [])
+        .flatMap((review) => {
+          if (
+            review.resourceId !== r.id ||
+            r.segments.some((s) => s.id === review.segmentId)
+          )
+            return [review];
+          const old = v.resources
+            .find((x) => x.id === r.id)
+            ?.segments.find((s) => s.id === review.segmentId);
+          const target =
+            old &&
+            r.segments.find((s) =>
+              s.original
+                .replace(/\s/g, "")
+                .includes(old.original.replace(/\s/g, "")),
+            );
+          return target ? [{ ...review, segmentId: target.id }] : [];
+        })
+        .filter(
+          (x, i, all) =>
+            all.findIndex(
+              (y) =>
+                y.resourceId === x.resourceId && y.segmentId === x.segmentId,
+            ) === i,
+        ),
+      versions: [
+        ...v.resources
+          .filter(
+            (x) => x.id === r.id && JSON.stringify(x) !== JSON.stringify(r),
+          )
+          .map((resource) => ({ resource, date: new Date().toISOString() })),
+        ...(v.versions ?? []),
+      ].slice(0, 20),
     }));
     setActiveId(r.id);
-    setSelected([]);
+    setSelected(undefined);
+    return value;
   }
   function edit(r?: Resource) {
+    if (editorDirty) {
+      go("editor");
+      setNotice("当前稿未保存，请先保存或清空编辑区。");
+      return;
+    }
+    setEditorSnapshot({
+      id: r?.id ?? "",
+      title: r?.title ?? "",
+      body: r ? resourceBody(r) : "",
+    });
+    setStructured(false);
     setEditId(r?.id ?? "");
     setTitle(r?.title ?? "");
     setBody(
@@ -409,33 +612,28 @@ export default function App() {
     );
     go("editor");
   }
-  function saveText(generated = false) {
-    if (!title.trim() || !body.trim()) throw new Error("请填写标题和文稿");
-    if (body.length > 100000) throw new Error("文稿上限 10 万字，请分篇保存");
+  async function saveText(generated = false) {
     const id = editId || uid();
     const existing = resources.find((r) => r.id === editId);
-    const segments = body
-      .split(/\r?\n/)
-      .filter((x) => x.trim())
-      .map((line, i) => {
-        const [original, ...translation] = line.split("\t");
-        return {
-          id: `${id}:${i}`,
-          original: original.trim(),
-          translation: translation.join("\t").trim() || undefined,
-          paragraph: i,
-        };
-      });
-    if (!segments.length) throw new Error("没有可朗读文字");
-    putResource({
-      ...existing,
-      id,
-      title: title.trim(),
-      kind: existing?.kind ?? "custom",
-      generated: generated || existing?.generated,
-      segments,
-    });
+    if (
+      existing &&
+      editId === editorSnapshot.id &&
+      (existing.title !== editorSnapshot.title ||
+        resourceBody(existing) !== editorSnapshot.body)
+    )
+      throw new Error("资料已更新，请先备份当前草稿再重新编辑");
+    const next = editResource(existing, id, title, body, uid);
+    putResource({ ...next, generated: generated || next.generated });
+    const normalized = resourceBody(next);
+    const value = update((v) => ({
+      ...v,
+      editorDraft: { id, title: next.title, body: normalized },
+    }));
+    await saveLibrary(value);
     setEditId(id);
+    setTitle(next.title);
+    setBody(normalized);
+    setEditorSnapshot({ id, title: next.title, body: normalized });
     setNotice("已保存到本机。每一行作为一个明确的朗读单元。");
   }
   async function importText() {
@@ -464,10 +662,13 @@ export default function App() {
     go("editor");
   }
   function stopAudio() {
+    setPreparation(null);
     audioPreparation.current++;
     audioAbort.current?.abort();
     audioAbort.current = null;
+    persistProgress();
     Audio.stop();
+    livePlanRef.current = null;
   }
   async function previewAudio(
     plan: AudioPlan,
@@ -485,6 +686,9 @@ export default function App() {
       config,
       consent,
       controller.signal,
+      (progress) => {
+        if (epoch === audioPreparation.current) setPreparation(progress);
+      },
     );
     if (epoch !== audioPreparation.current || controller.signal.aborted)
       throw new Error("已停止试听");
@@ -495,18 +699,20 @@ export default function App() {
     if (prepared.warnings.length) setNotice(prepared.warnings.join("；"));
   }
   function pronunciationMap() {
-    const values: Record<string, string> = {};
-    for (const line of dictionary.split("\n").filter(Boolean)) {
-      const [word, ...replacement] = line.split("=");
-      if (word && replacement.join("=")) values[word] = replacement.join("=");
-    }
-    return values;
+    return {
+      ...db.pronunciations?.global,
+      ...db.pronunciations?.resources[active.id],
+    };
   }
+
   async function playCompiled(
-    p: ReturnType<typeof compileSession>,
+    p: ReturnType<typeof compileSession> & {
+      pronunciations?: Record<string, string>;
+    },
     resume = false,
     playbackRate = rate,
   ) {
+    const resumeMarker=resume?dbRef.current.resume:undefined;
     stopAudio();
     started.current = false;
     setPlan(null);
@@ -515,7 +721,13 @@ export default function App() {
     audioAbort.current?.abort();
     const controller = new AbortController();
     audioAbort.current = controller;
-    const source = { ...p, pronunciations: pronunciationMap() };
+    setPreparation(null);
+    const source = {
+      ...p,
+      pronunciations: p.pronunciations ?? pronunciationMap(),
+    };
+    sourcePlan.current = source;
+    contextRef.current = playbackContext();
     if (
       source.steps.some((s) => s.voiceId?.startsWith("remote:")) &&
       (!voiceConnection.ready || !voiceConnection.keyReady)
@@ -526,6 +738,9 @@ export default function App() {
       voiceConnection.settings,
       voiceConnection.consent,
       controller.signal,
+      (progress) => {
+        if (epoch === audioPreparation.current) setPreparation(progress);
+      },
     );
     if (epoch !== audioPreparation.current || controller.signal.aborted)
       throw new Error("已停止准备");
@@ -536,15 +751,52 @@ export default function App() {
     }
     setPlan(next);
     livePlanRef.current = next;
+    if (Platform.OS === "ios")
+      update((v) => ({
+        ...v,
+        offline: {
+          ...v.offline,
+          ...Object.fromEntries(
+            [...new Set(p.steps.map((s) => s.resourceId).filter(Boolean))].map(
+              (id) => [
+                id,
+                {
+                  steps: p.steps.filter((s) => s.resourceId === id).length,
+                  date: new Date().toISOString(),
+                },
+              ],
+            ),
+          ),
+        },
+      }));
     Audio.setRate(playbackRate);
-    if (resume && positionRestore.current) {
-      Audio.seek(Math.min(positionRestore.current, info.duration));
-      positionRestore.current = 0;
+    const position = resume
+      ? resumePosition(
+          resumeMarker,
+          next,
+          info.duration,
+          contextRef.current,
+        )
+      : undefined;
+    if (position !== undefined) Audio.seek(position);
+    const seconds = stopAt ? (stopAt - Date.now()) / 1000 : sleep * 60;
+    if (stopAt && seconds <= 0) {
+      stopAudio();
+      setPlan(null);
+      throw new Error("停止时间已到，未开始播放");
     }
-    if (sleep) Audio.setSleepTimer(sleep * 60, 10);
+    Audio.setSleepTimer(Math.max(0, seconds), 10);
     Audio.play();
-    setPage("player");
-    const warnings = [...p.warnings, ...prepared.warnings];
+    const now = Audio.getStatus();
+    const remaining = next.steps
+      .slice(now.stepIndex)
+      .map((s) => s.resourceId)
+      .filter((id, i, all) => id && (i === 0 || id !== all[i - 1]));
+    setQueue(remaining.slice(1) as string[]);
+    go("player");
+    const warnings = [...(p.warnings ?? []), ...prepared.warnings];
+    if (resume && resumeMarker?.position && position === undefined)
+      warnings.push("恢复标记与当前编排不符，已从头开始。");
     if (warnings.length) setNotice([...new Set(warnings)].join("；"));
   }
   async function start(
@@ -553,19 +805,22 @@ export default function App() {
     resume = false,
     playbackRate = rate,
   ) {
-    if (busy) return;
+    if (audioBusy) return;
     await task("准备本地音频 · 请保持前台", async () => {
       setActiveId(resource.id);
+      setTemplateId(chosen.id);
+      sessionMeta.current = {
+        templateId:chosen.id,
+        selectedIds: resource.id === activeId ? selected : undefined,
+        rate: playbackRate,
+      };
       setQueue([]);
       const p = compileSession(
         [
           {
             resource,
             template: chosen,
-            selectedIds:
-              resource.id === activeId && selected.length
-                ? selected
-                : undefined,
+            selectedIds: resource.id === activeId ? selected : undefined,
             voiceId: db.settings.voiceId || undefined,
             translationVoiceId: db.settings.translationVoiceId || undefined,
           },
@@ -579,7 +834,7 @@ export default function App() {
     ids: string[],
     itemOptions?: Library["playlists"][number]["options"],
   ) {
-    if (busy) return;
+    if (audioBusy) return;
     await task("准备完整播放列表 · 缓存完成后可锁屏", async () => {
       const entries = ids.map((id) => {
         const resource = resources.find((r) => r.id === id);
@@ -594,6 +849,8 @@ export default function App() {
           rate: options?.rate ?? 1,
         };
       });
+      sessionMeta.current = { rate,templateId:entries[0]?.template.id };
+      setSelected(undefined);
       const p = compileSession(entries, { loop, repeat: repeatCount, shuffle });
       const order = p.steps
         .map((s) => s.resourceId!)
@@ -604,39 +861,121 @@ export default function App() {
     });
   }
   async function generate(force = false) {
-    await task(
-      force ? "重新生成 · 将调用模型接口" : "准备讲稿 · 优先复用本次会话缓存",
-      async () => {
-        const result = await generateCachedScript(
-          (() => {
-            if (!modelConnection.settings)
-              throw new Error("请先连接服务并选择模型");
-            return modelConnection.settings;
-          })(),
-          aiSource,
-          aiStyle,
-          prompt,
-          force,
-        );
+    if (aiJob.current) return;
+    if (!modelConnection.settings) {
+      setNotice("请先连接服务并选择模型");
+      return;
+    }
+    const id = ++aiEpoch.current,
+      controller = new AbortController(),
+      revision = aiRevision.current;
+    const requestIdentity = fingerprint([
+      aiSource,
+      aiStyle,
+      prompt,
+      modelConnection.settings,
+    ]);
+    aiJob.current = { id, controller };
+    setAIRunning(true);
+    setNotice("");
+    const config = modelConnection.settings;
+    try {
+      const result = await generateCachedScript(
+        config,
+        aiSource,
+        aiStyle,
+        prompt,
+        force,
+        controller.signal,
+      );
+      if (controller.signal.aborted || aiJob.current?.id !== id) return;
+      update((v) => ({
+        ...v,
+        scriptHistory: [
+          {
+            id: uid(),
+            text: result.text,
+            date: new Date().toISOString(),
+            model: config.model,
+          },
+          ...(v.scriptHistory ?? []),
+        ].slice(0, 10),
+      }));
+      if (
+        aiRevision.current === revision &&
+        aiRequestRef.current === requestIdentity
+      ) {
         setAIOutput(result.text);
+        update((v) => ({ ...v, scriptDraft: result.text }));
         setUsage(
           result.cached
-            ? "已复用本次会话生成结果，未调用接口"
-            : result.usage
-              ? `本次接口报告：输入 ${result.usage.prompt_tokens ?? "?"} / 输出 ${result.usage.completion_tokens ?? "?"} tokens`
-              : "接口未提供用量数据",
+            ? "已复用生成结果，未重复请求"
+            : "生成完成，请核对资料。",
         );
-      },
-    );
+      } else setNotice("生成稿已存入历史，保留当前编辑。");
+    } catch (e) {
+      if (!controller.signal.aborted) message(e);
+    } finally {
+      if (aiJob.current?.id === id) {
+        aiJob.current = null;
+        setAIRunning(false);
+      }
+    }
+  }
+  const aiRequestRef = useRef("");
+  aiRequestRef.current = fingerprint([
+    aiSource,
+    aiStyle,
+    prompt,
+    modelConnection.settings,
+  ]);
+  function continuePlayback() {
+    if (audioBusy) return;
+    if(selected&&selected.length===0){setNotice("筛选为空，请重新选择句段");return;}
+    if (
+      plan &&
+      livePlanRef.current &&
+      plan.steps[statusRef.current.stepIndex]?.resourceId === active.id
+    ) {
+      if (stopAt) {
+        const seconds = (stopAt - Date.now()) / 1000;
+        if (seconds <= 0) {
+          setNotice("停止时间已到");
+          return;
+        }
+        Audio.setSleepTimer(seconds, 10);
+      }
+      Audio.play();
+      go("player");
+      return;
+    }
+    const saved = dbRef.current.resume;
+    if (saved)
+      sessionMeta.current = {
+        templateId:saved.templateId,
+        selectedIds: saved.selectedIds,
+        rate: saved.rate ?? rate,
+      };
+    if (
+      saved?.sourcePlan &&
+      saved.context === playbackContext() &&
+      saved.resourceId === active.id
+    ) {
+      void task("准备恢复会话", () =>
+        playCompiled(
+          saved.sourcePlan as ReturnType<typeof compileSession>,
+          true,
+          saved.rate ?? rate,
+        ),
+      );
+    } else void start(active, template, true);
   }
   function toggle() {
-    if (busy) return;
+    if (audioBusy) return;
     if (status.playing) {
       Audio.pause();
       persistProgress();
-    } else if (plan) {
-      Audio.play();
-    } else void start(active, template, true);
+    } else continuePlayback();
   }
   function nextSentence(delta: number, paragraph = false) {
     if (!plan) return;
@@ -713,6 +1052,9 @@ export default function App() {
           styles.button,
           {
             backgroundColor: primary ? c.accent : c.soft,
+            maxWidth: "100%",
+            borderWidth: /删除|清理/.test(label) ? 1 : 0,
+            borderColor: c.line,
             opacity: disabled ? 0.4 : pressed ? 0.65 : 1,
           },
         ]}
@@ -726,6 +1068,7 @@ export default function App() {
         )}
         <Text
           style={{
+            flexShrink: 1,
             color: primary ? c.onAccent : c.accent,
             fontSize: 15,
             fontWeight: "600",
@@ -807,7 +1150,7 @@ export default function App() {
               livePlanRef.current = null;
             }
             setActiveId(r.id);
-            setSelected([]);
+            setSelected(undefined);
             go("player");
           }}
           style={{
@@ -841,561 +1184,53 @@ export default function App() {
       </View>
     );
   }
-  const currentSegment = plan?.steps[status.stepIndex]?.segmentId;
-  useEffect(() => {
-    if (currentSegment && showTranscript)
-      transcriptRef.current?.scrollTo({
-        y: Math.max(0, (transcriptOffsets.current[currentSegment] ?? 0) - 12),
-        animated: !reduceMotion.current,
-      });
-  }, [currentSegment, showTranscript]);
-  function player() {
-    return (
-      <>
-        <View
-          style={[
-            styles.playerColumns,
-            wide && { flexDirection: "row", gap: 48 },
-          ]}
-        >
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <View
-              style={[
-                styles.cover,
-                {
-                  backgroundColor: c.cover,
-                  aspectRatio: 1,
-                  width: "100%",
-                  maxWidth: 320,
-                  alignSelf: "center",
-                },
-              ]}
-            >
-              <View style={[styles.coverRule, { borderColor: c.accent }]}>
-                <Text
-                  style={{ fontSize: 12, letterSpacing: 5, color: c.accent }}
-                >
-                  noxia
-                </Text>
-                <Text
-                  numberOfLines={4}
-                  style={{
-                    fontSize: 32,
-                    lineHeight: 44,
-                    fontWeight: "300",
-                    color: c.text,
-                    marginVertical: 32,
-                  }}
-                >
-                  {active?.title}
-                </Text>
-                <View
-                  style={{ width: 32, height: 1, backgroundColor: c.accent }}
-                />
-                <Text style={{ color: c.accent, marginTop: 22, fontSize: 13 }}>
-                  {active?.kind === "grammar"
-                    ? "语言与思考"
-                    : `${active.segments.length} 个句段`}
-                </Text>
-              </View>
-            </View>
-            <View style={{ marginTop: 26 }}>
-              <Text style={{ color: c.text, fontSize: 25, fontWeight: "600" }}>
-                {active?.title}
-              </Text>
-              <Text style={{ color: c.muted, fontSize: 15, marginTop: 7 }}>
-                {active?.author ?? "我的学习文稿"}
-              </Text>
-            </View>
-            <Pressable
-              accessibilityRole="adjustable"
-              accessibilityLabel="播放进度，点击定位"
-              accessibilityValue={{
-                min: 0,
-                max: Math.round(status.duration),
-                now: Math.round(status.position),
-              }}
-              onAccessibilityAction={(e) =>
-                Audio.seek(
-                  status.position +
-                    (e.nativeEvent.actionName === "increment" ? 10 : -10),
-                )
-              }
-              accessibilityActions={[
-                { name: "increment", label: "前进10秒" },
-                { name: "decrement", label: "后退10秒" },
-              ]}
-              onLayout={(e) => {
-                progressWidth.current = e.nativeEvent.layout.width;
-              }}
-              onPress={(e) =>
-                Audio.seek(
-                  Math.max(
-                    0,
-                    Math.min(
-                      1,
-                      e.nativeEvent.locationX / progressWidth.current,
-                    ),
-                  ) * status.duration,
-                )
-              }
-              style={{ height: 44, justifyContent: "center", marginTop: 19 }}
-            >
-              <View
-                style={{ height: 4, borderRadius: 2, backgroundColor: c.line }}
-              >
-                <View
-                  style={{
-                    height: 4,
-                    borderRadius: 2,
-                    backgroundColor: c.accent,
-                    width: `${status.duration ? Math.min(100, (status.position / status.duration) * 100) : 0}%`,
-                  }}
-                />
-              </View>
-            </Pressable>
-            <View
-              style={{ flexDirection: "row", justifyContent: "space-between" }}
-            >
-              {small(clock(status.position))}
-              {small(clock(status.duration))}
-            </View>
-            <View style={styles.transport}>
-              {button(
-                "上一句",
-                () => nextSentence(-1),
-                false,
-                "play-skip-back-outline",
-              )}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={status.playing ? "暂停" : "播放"}
-                onPress={toggle}
-                style={[styles.playCircle, { backgroundColor: c.accent }]}
-              >
-                <Ionicons
-                  name={status.playing ? "pause" : "play"}
-                  size={36}
-                  color={c.bg}
-                />
-              </Pressable>
-              {button(
-                "下一句",
-                () => nextSentence(1),
-                false,
-                "play-skip-forward-outline",
-              )}
-            </View>
-            <View style={styles.chips}>
-              {button("上一段", () => nextSentence(-1, true))}
-              {button("下一段", () => nextSentence(1, true))}
-              {button("−10 秒", () =>
-                Audio.seek(Math.max(0, status.position - 10)),
-              )}
-              {button("+10 秒", () => Audio.seek(status.position + 10))}
-              {button(`${rate}×`, () => {
-                const n =
-                  rate >= 1.5 ? 0.75 : Math.round((rate + 0.25) * 100) / 100;
-                setRate(n);
-                Audio.setRate(n);
-              })}
-              {button(
-                loop ? "循环 · 开" : "循环",
-                () => {
-                  setLoop(!loop);
-                  setNotice("循环设置将在下次「重新编排」时生效");
-                },
-                loop,
-              )}
-            </View>
-            <View style={styles.chips}>
-              {[0, 15, 30, 45].map((n) =>
-                button(
-                  n ? `${n} 分钟` : "取消定时",
-                  () => {
-                    setSleep(n);
-                    Audio.setSleepTimer(n * 60, 10);
-                  },
-                  sleep === n,
-                ),
-              )}
-            </View>
-            {small(
-              sleep
-                ? `睡眠定时 ${sleep} 分钟 · 最后 10 秒渐弱`
-                : "播放完毕后停止。锁屏能力需原生开发构建。",
-            )}
-            <View style={styles.chips}>
-              {button(
-                "重新编排并播放",
-                () => void start(),
-                false,
-                "refresh-outline",
-              )}
-              {button("编辑文稿", () => edit(active))}
-            </View>
-          </View>
-          <View style={{ flex: 1, minWidth: 0, marginTop: wide ? 0 : 36 }}>
-            <Text style={[styles.eyebrow, { color: c.accent }]}>阅读面板</Text>
-            {section("原文与笔记")}
-            {button(showTranscript ? "收起阅读面板" : "展开阅读面板", () =>
-              setShowTranscript(!showTranscript),
-            )}
-            {small("点选句子后重新编排，只听选中的部分。未选择时播放全文。")}
-            {showTranscript && (
-              <ScrollView
-                ref={transcriptRef}
-                nestedScrollEnabled
-                style={{ maxHeight: wide ? 520 : 420 }}
-              >
-                {active?.segments.map((s, i) => (
-                  <Pressable
-                    key={s.id}
-                    onLayout={(e) => {
-                      transcriptOffsets.current[s.id] = e.nativeEvent.layout.y;
-                    }}
-                    accessibilityRole="checkbox"
-                    accessibilityState={{ checked: selected.includes(s.id) }}
-                    aria-checked={selected.includes(s.id)}
-                    onPress={() =>
-                      setSelected((v) =>
-                        v.includes(s.id)
-                          ? v.filter((x) => x !== s.id)
-                          : [...v, s.id],
-                      )
-                    }
-                    style={[
-                      styles.transcript,
-                      {
-                        borderLeftColor:
-                          currentSegment === s.id ? c.accent : "transparent",
-                        backgroundColor: selected.includes(s.id)
-                          ? c.soft
-                          : "transparent",
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={{
-                        color: currentSegment === s.id ? c.accent : c.muted,
-                        fontSize: 12,
-                        marginBottom: 10,
-                      }}
-                    >
-                      {String(i + 1).padStart(2, "0")}
-                      {s.important ? " · 考试重点" : ""}
-                      {selected.includes(s.id) ? " · 已选" : ""}
-                    </Text>
-                    <Text
-                      style={{
-                        color: currentSegment === s.id ? c.text : c.muted,
-                        fontSize: 23,
-                        lineHeight: 36,
-                        fontWeight: currentSegment === s.id ? "500" : "400",
-                      }}
-                    >
-                      {s.original}
-                    </Text>
-                    {s.translation && (
-                      <Text
-                        style={{
-                          fontSize: 15,
-                          lineHeight: 25,
-                          color: c.muted,
-                          marginTop: 12,
-                        }}
-                      >
-                        {s.translation}
-                      </Text>
-                    )}
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
-            <View style={styles.chips}>
-              {button("只选重点", () =>
-                setSelected(
-                  active.segments.filter((s) => s.important).map((s) => s.id),
-                ),
-              )}
-              {button("清除选择", () => setSelected([]))}
-            </View>
-            {active.source && (
-              <View style={{ marginTop: 20 }}>
-                {small(
-                  (active as Resource & { attribution?: string }).attribution ??
-                    `资源来源：${active.source.repo}`,
-                )}
-                {button(
-                  "查看原始资源与许可",
-                  () => void Linking.openURL(active.source!.url),
-                )}
-                {small(
-                  "来源资料保留原许可；修改后的内容仍需核对，不能随 MIT 代码再分发。",
-                )}
-              </View>
-            )}
-            {section("使用编排")}
-            <View style={styles.chips}>
-              {allTemplates.map((t) =>
-                button(
-                  t.name,
-                  () => {
-                    setTemplateId(t.id);
-                    setNotice("已选择，点击「重新编排并播放」应用");
-                  },
-                  template.id === t.id,
-                ),
-              )}
-            </View>
-            {section("播放规则")}
-            <View style={styles.chips}>
-              <View style={{ width: 160 }}>
-                {small("整篇／列表次数 1—20")}
-                {input(
-                  String(repeatCount),
-                  (v) => setRepeatCount(Number(v)),
-                  "全篇播放次数",
-                )}
-              </View>
-              {button(
-                shuffle ? "随机顺序 · 开" : "随机顺序",
-                () => setShuffle(!shuffle),
-                shuffle,
-              )}
-            </View>
-            {button(
-              "准备当前篇与待播队列",
-              () => void startList([active.id, ...queue]),
-            )}
-            {section(`待播队列 · ${queue.length}`)}
-            {queue.map((id, i) => (
-              <View key={`${id}-${i}`} style={styles.inline}>
-                <Text style={{ color: c.text, flex: 1 }}>
-                  {resources.find((r) => r.id === id)?.title ?? id}
-                </Text>
-                {button("移除", () =>
-                  setQueue((v) => v.filter((_, j) => j !== i)),
-                )}
-              </View>
-            ))}
-            {small("播放前会先生成音频；更改队列后需重新准备。")}
-          </View>
-        </View>
-      </>
-    );
-  }
-  function saveTemplate() {
-    if (!templateDraft) return;
-    const valid = parseTemplate(exportTemplate(templateDraft));
-    update((v) => ({
-      ...v,
-      templates: [valid, ...v.templates.filter((t) => t.id !== valid.id)],
-    }));
-    setTemplateId(valid.id);
-    setNotice("模板已保存在本机");
-  }
-  function patchStep(index: number, patch: Partial<Step>) {
-    setTemplateDraft((t) =>
-      t
-        ? {
-            ...t,
-            steps: t.steps.map((s, i) =>
-              i === index ? { ...s, ...patch } : s,
-            ),
-          }
-        : t,
-    );
-  }
-  function templatePage() {
-    return (
-      <>
-        {heading("编排", "按顺序组合朗读、重复和留白")}
-        <View style={styles.chips}>
-          {allTemplates.map((t) =>
-            button(t.name, () =>
-              setTemplateDraft({
-                ...t,
-                id: db.templates.some((v) => v.id === t.id) ? t.id : uid(),
-                steps: t.steps.map((s) => ({ ...s })),
-              }),
-            ),
-          )}
-          {button(
-            "新建模板",
-            () =>
-              setTemplateDraft({
-                id: uid(),
-                name: "我的编排",
-                scope: "sentence",
-                steps: [makeStep("original")],
-              }),
-            true,
-          )}
-        </View>
-        {templateDraft && (
-          <>
-            {input(
-              templateDraft.name,
-              (name) => setTemplateDraft({ ...templateDraft, name }),
-              "模板名称",
-            )}
-            <View style={styles.chips}>
-              {(["sentence", "paragraph", "document"] as const).map((scope) =>
-                button(
-                  { sentence: "逐句", paragraph: "逐段", document: "全文" }[
-                    scope
-                  ],
-                  () => setTemplateDraft({ ...templateDraft, scope }),
-                  templateDraft.scope === scope,
-                ),
-              )}
-            </View>
-            {templateDraft.steps.map((s, i) => (
-              <View
-                key={`${i}-${s.id}`}
-                style={[styles.step, { borderColor: c.line }]}
-              >
-                <View style={styles.inline}>
-                  <Text style={{ fontSize: 20, color: c.text, flex: 1 }}>
-                    {i + 1}. {labels[s.kind]}
-                  </Text>
-                  {button(
-                    s.enabled ? "启用" : "停用",
-                    () => patchStep(i, { enabled: !s.enabled }),
-                    s.enabled,
-                  )}
-                  {button("↑", () => {
-                    if (!i) return;
-                    const steps = [...templateDraft.steps];
-                    [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]];
-                    setTemplateDraft({ ...templateDraft, steps });
-                  })}
-                  {button("↓", () => {
-                    if (i === templateDraft.steps.length - 1) return;
-                    const steps = [...templateDraft.steps];
-                    [steps[i], steps[i + 1]] = [steps[i + 1], steps[i]];
-                    setTemplateDraft({ ...templateDraft, steps });
-                  })}
-                  {button("删除", () =>
-                    setTemplateDraft({
-                      ...templateDraft,
-                      steps: templateDraft.steps.filter((_, j) => j !== i),
-                    }),
-                  )}
-                </View>
-                <View style={styles.chips}>
-                  <View style={{ width: 100 }}>
-                    {small("重复次数")}
-                    {input(
-                      String(s.repeat),
-                      (v) => patchStep(i, { repeat: Number(v) }),
-                      "次数",
-                    )}
-                  </View>
-                  <View style={{ width: 110 }}>
-                    {small("语速倍率")}
-                    {input(
-                      String(s.rate),
-                      (v) => patchStep(i, { rate: Number(v) }),
-                      "语速",
-                    )}
-                  </View>
-                  <View style={{ width: 110 }}>
-                    {small("音量 0—1")}
-                    {input(
-                      String(s.volume),
-                      (v) => patchStep(i, { volume: Number(v) }),
-                      "音量",
-                    )}
-                  </View>
-                  <View style={{ width: 130 }}>
-                    {small("停顿／留白毫秒")}
-                    {input(
-                      String(s.durationMs),
-                      (v) => patchStep(i, { durationMs: Number(v) }),
-                      "时长",
-                    )}
-                  </View>
-                </View>
-                {s.kind === "custom" &&
-                  input(
-                    s.text ?? "",
-                    (text) => patchStep(i, { text }),
-                    "自定义朗读文字",
-                  )}
-                {input(
-                  s.voiceId ?? "",
-                  (voiceId) => patchStep(i, { voiceId: voiceId || undefined }),
-                  "音色 ID（留空使用默认）",
-                )}
-              </View>
-            ))}
-            {section("添加步骤")}
-            <View style={styles.chips}>
-              {Object.keys(labels).map((kind) =>
-                button(labels[kind], () =>
-                  setTemplateDraft({
-                    ...templateDraft,
-                    steps: [
-                      ...templateDraft.steps,
-                      makeStep(kind as Step["kind"]),
-                    ],
-                  }),
-                ),
-              )}
-            </View>
-            <View style={styles.chips}>
-              {button(
-                "保存模板",
-                () => {
-                  try {
-                    saveTemplate();
-                  } catch (e) {
-                    message(e);
-                  }
-                },
-                true,
-              )}
-              {button("导出为 JSON 文本", () => {
-                try {
-                  setTemplateJSON(exportTemplate(templateDraft));
-                } catch (e) {
-                  message(e);
-                }
-              })}
-              {button("删除自建模板", () => {
-                update((v) => ({
-                  ...v,
-                  templates: v.templates.filter(
-                    (t) => t.id !== templateDraft.id,
-                  ),
-                }));
-                setTemplateDraft(null);
-              })}
-            </View>
-          </>
-        )}
-        {section("导入与导出")}
-        {input(
-          templateJSON,
-          setTemplateJSON,
-          "粘贴模板 JSON，或复制已导出的文本",
-          true,
-        )}
-        {button("校验并导入", () => {
-          try {
-            setTemplateDraft({ ...parseTemplate(templateJSON), id: uid() });
-            setNotice("已校验，确认后保存");
-          } catch (e) {
-            message(e);
-          }
-        })}
-      </>
+  function replaceLibrary(value: Library) {
+    stopAudio();
+    setPlan(null);
+    dbRef.current = value;
+    setDb(value);
+    setStorageOK(true);
+    setLoaded(true);
+    setActiveId(value.resume?.resourceId ?? value.resources[0]?.id ?? "");
+    setTemplateId(value.resume?.templateId ?? "");
+    setSelected(value.resume?.selectedIds);
+    setAIOutput(value.scriptDraft ?? "");
+    setDictionary(
+      Object.entries(value.pronunciations?.global ?? {})
+        .map(([a, b]) => `${a}=${b}`)
+        .join("\n"),
     );
   }
   function render() {
+    if (!loaded)
+      return (
+        <ActivityIndicator accessibilityLabel="打开资料中" color={c.text} />
+      );
+    if (!storageOK)
+      return (
+        <>
+          {heading("资料恢复", "原始数据已保留，请导出后选择备份恢复。")}
+          <DataPanel
+            db={db}
+            colors={c}
+            report={setNotice}
+            onChange={replaceLibrary}
+          />
+        </>
+      );
     switch (page) {
+      case "review":
+        return (
+          <ReviewPage
+            db={db}
+            colors={c}
+            onChange={(value) => {
+              dbRef.current = value;
+              setDb(value);
+            }}
+            report={setNotice}
+          />
+        );
       case "home":
         return (
           <>
@@ -1428,12 +1263,7 @@ export default function App() {
                   继续上次播放，或更换背诵模板。
                 </Text>
                 <View style={styles.chips}>
-                  {button(
-                    "继续听",
-                    () => void start(active, template, true),
-                    true,
-                    "play",
-                  )}
+                  {button("继续听", continuePlayback, true, "play")}
                   {button("打开播放器", () => go("player"))}
                 </View>
               </View>
@@ -1470,6 +1300,11 @@ export default function App() {
             </View>
             {section("文稿")}
             {resources.slice(0, 6).map(row)}
+            {section("每日任务")}
+            {small(
+              `自评 ${db.reviews?.length ?? 0} 句 · 薄弱 ${db.reviews?.filter((r) => r.score < 2).length ?? 0} 句`,
+            )}
+            {button("开始复习", () => go("review"), true)}
             {section("复习入口")}
             {small(
               "听过不等于掌握。播放记录与默写、做题结果分开；可前往原学习项目练习。",
@@ -1496,14 +1331,50 @@ export default function App() {
         return (
           <>
             {heading("正在播放")}
-            {player()}
+            <PlayerPage
+              active={active}
+              resources={resources}
+              status={status}
+              plan={plan}
+              wide={wide}
+              colors={c}
+              selected={selected}
+              setSelected={setSelected}
+              rate={rate}
+              setRate={setRate}
+              loop={loop}
+              setLoop={setLoop}
+              sleep={sleep}
+              setSleep={setSleep}
+              stopAt={stopAt}
+              setStopAt={setStopAt}
+              allTemplates={allTemplates}
+              template={template}
+              setTemplateId={setTemplateId}
+              repeatCount={repeatCount}
+              setRepeatCount={setRepeatCount}
+              shuffle={shuffle}
+              setShuffle={setShuffle}
+              queue={queue}
+              setQueue={setQueue}
+              reduceMotion={reduceMotion.current}
+              ui={{ button, input, section, small, heading }}
+              actions={{
+                toggle,
+                nextSentence,
+                start,
+                startList,
+                edit,
+                setNotice,
+              }}
+            />
           </>
         );
       case "library":
         return (
           <>
             {heading("资源", "本机保存，可自由组合。远程资源保留各自的许可。")}
-            {input(query, setQuery, "搜索标题")}
+            {input(query, setQuery, "搜索全文")}
             <View style={styles.chips}>
               {button("新建文稿", () => edit(), true)}
               {button(
@@ -1511,7 +1382,25 @@ export default function App() {
                 () => void task("读取文件", importText),
               )}
             </View>
-            {resources.filter((r) => r.title.includes(query)).map(row)}
+            {resources
+              .filter((r) =>
+                [
+                  r.title,
+                  r.author,
+                  ...r.segments.flatMap((s) => [
+                    s.original,
+                    s.translation,
+                    s.explanation,
+                    Array.isArray(s.keywords)
+                      ? s.keywords.join(" ")
+                      : s.keywords,
+                  ]),
+                ].some((x) => x?.toLowerCase().includes(query.toLowerCase())),
+              )
+              .slice(0, listLimit)
+              .map(row)}
+            {resources.length > listLimit &&
+              button("更多资料", () => setListLimit((v) => v + 40))}
             {section("连接学习项目")}
             {small(
               "以下两个项目采用个人非商业许可。下载仅供个人学习；内容不是 MIT 授权教材，不随 Noxia 开源代码分发。",
@@ -1597,8 +1486,20 @@ export default function App() {
         return (
           <>
             {heading(
-              "文稿",
+              editId ? "编辑文稿" : "新建文稿",
               "一行一个朗读单元；原文与译文之间用 Tab 分隔，不猜测文言文句子对应。",
+            )}
+            {small(
+              editId
+                ? `正在编辑 · ${resources.find((r) => r.id === editId)?.title ?? "已移除资料"}`
+                : "新建文稿，不覆盖已有资料",
+            )}
+            {small(
+              tasks.includes("保存文稿")
+                ? "保存中…"
+                : editorDirty
+                  ? "未保存"
+                  : saveState,
             )}
             {input(title, setTitle, "作品标题")}
             {input(
@@ -1611,11 +1512,7 @@ export default function App() {
               {button(
                 "保存文稿",
                 () => {
-                  try {
-                    saveText();
-                  } catch (e) {
-                    message(e);
-                  }
+                  void task("保存文稿", () => saveText());
                 },
                 true,
                 "checkmark-outline",
@@ -1625,10 +1522,44 @@ export default function App() {
                 setBody("");
                 setTitle("");
                 setEditId("");
+                setEditorSnapshot({ id: "", title: "", body: "" });
               })}
             </View>
             {small(
               "PDF 提取和扫描 OCR 尚未实现，请先转换为 TXT。导入文件仅保存在本机，不自动上传。",
+            )}
+            {editId &&
+              button(structured ? "收起句段编辑" : "句段编辑", () => {
+                const r = resources.find((r) => r.id === editId);
+                if (
+                  !structured &&
+                  r &&
+                  (body !== resourceBody(r) || title !== r.title)
+                ) {
+                  setNotice("请先保存文字，再编辑句段");
+                  return;
+                }
+                setStructured(!structured);
+              })}
+            {structured && resources.find((r) => r.id === editId) && (
+              <SegmentEditor
+                key={editId}
+                resource={resources.find((r) => r.id === editId)!}
+                colors={c}
+                report={setNotice}
+                onSave={async (r) => {
+                  const value = putResource(r);
+                  setBody(resourceBody(r));
+                  await saveLibrary(value);
+                  setStructured(false);
+                  setEditorSnapshot({
+                    id: r.id,
+                    title: r.title,
+                    body: resourceBody(r),
+                  });
+                  setNotice("句段已保存");
+                }}
+              />
             )}
             {section("已有文稿")}
             {resources.map((r) => (
@@ -1643,20 +1574,53 @@ export default function App() {
                   setPlan(null);
                   update((v) => ({
                     ...v,
+                    trash: [
+                      {
+                        resource: r,
+                        deletedAt: new Date().toISOString(),
+                        playlists: v.playlists.filter((p) =>
+                          p.resourceIds.includes(r.id),
+                        ),
+                      },
+                      ...(v.trash ?? []),
+                    ],
+                    resume:
+                      v.resume?.resourceId === r.id ? undefined : v.resume,
                     resources: v.resources.filter((x) => x.id !== r.id),
                     playlists: v.playlists.map((p) => ({
                       ...p,
                       resourceIds: p.resourceIds.filter((id) => id !== r.id),
                     })),
                   }));
-                  setNotice("已从书架删除。音频缓存可在离线音频页清理。");
+                  if (editId === r.id) {
+                    setEditId("");
+                    setTitle("");
+                    setBody("");
+                    setEditorSnapshot({ id: "", title: "", body: "" });
+                  }
+                  setNotice("已移入回收站，可在设置中恢复。");
                 })}
               </View>
             ))}
           </>
         );
       case "templates":
-        return templatePage();
+        return (
+          <TemplatePage
+            db={db}
+            allTemplates={allTemplates}
+            templateDraft={templateDraft}
+            setTemplateDraft={setTemplateDraft}
+            templateJSON={templateJSON}
+            setTemplateJSON={setTemplateJSON}
+            setTemplateId={setTemplateId}
+            update={update}
+            setNotice={setNotice}
+            message={message}
+            ui={{ button, input, heading, section, small }}
+            colors={c}
+          />
+        );
       case "voices":
         return (
           <VoiceSettings
@@ -1726,7 +1690,33 @@ export default function App() {
               })
             }
             dictionary={dictionary}
-            onDictionaryChange={setDictionary}
+            onDictionaryChange={(v) => {
+              setDictionary(v);
+              setDictionaryState("未保存");
+            }}
+            dictionaryState={dictionaryState}
+            onSaveDictionary={() => {
+              try {
+                if (!storageOK) throw new Error("请先备份并恢复资料库");
+                const global = validatePronunciations(dictionary);
+                update((v) => ({
+                  ...v,
+                  pronunciations: {
+                    global,
+                    resources: v.pronunciations?.resources ?? {},
+                  },
+                }));
+                setDictionaryState("保存中…");
+                void saveLibrary(dbRef.current)
+                  .then(() => setDictionaryState("已保存"))
+                  .catch((e) => {
+                    setDictionaryState("保存失败");
+                    message(e);
+                  });
+              } catch (e) {
+                message(e);
+              }
+            }}
           />
         );
       case "audio":
@@ -1755,11 +1745,27 @@ export default function App() {
                   void task("清理音频", async () => {
                     stopAudio();
                     setPlan(null);
+                    if (!confirmCache) {
+                      setConfirmCache(true);
+                      setNotice("清理会停止播放并删除全部音频；再点一次确认。");
+                      return;
+                    }
                     await Audio.clearCache();
+                    update((v) => ({ ...v, offline: {} }));
+                    setConfirmCache(false);
                     setCache(await Audio.getCacheInfo());
                   }),
               )}
             </View>
+            {section("已准备篇目")}
+            {Object.entries(db.offline ?? {}).map(([id, x]) => (
+              <Text key={id} style={{ color: c.text, lineHeight: 26 }}>
+                {resources.find((r) => r.id === id)?.title ?? "已删除文稿"} ·{" "}
+                {x.steps} 步
+              </Text>
+            ))}
+            {!Object.keys(db.offline ?? {}).length &&
+              small("暂无本机音频；播放前先准备。")}
             {section(
               `${cache.count} 个片段 · ${(cache.bytes / 1024 / 1024).toFixed(1)} MB`,
             )}
@@ -1968,8 +1974,20 @@ export default function App() {
                 {button("继续复习", () => {
                   const r = resources.find((x) => x.id === h.resourceId);
                   if (r) {
-                    positionRestore.current = h.position;
-                    void start(r, template, true);
+                    setActiveId(r.id);
+                    if (db.resume?.resourceId === r.id) {
+                      void task("准备恢复会话", () =>
+                        db.resume?.sourcePlan &&
+                        db.resume.context === playbackContext()
+                          ? playCompiled(
+                              db.resume.sourcePlan as ReturnType<
+                                typeof compileSession
+                              >,
+                              true,
+                            )
+                          : start(r, template, true),
+                      );
+                    } else void start(r, template);
                   }
                 })}
               </View>
@@ -2003,15 +2021,43 @@ export default function App() {
               true,
             )}
             <View style={styles.chips}>
-              {button("生成讲稿", () => void generate(), true)}
-              {button("重新生成（调用接口）", () => void generate(true))}
+              {button(
+                "生成讲稿",
+                () => void generate(),
+                true,
+                undefined,
+                aiRunning || !modelConnection.canGenerate,
+              )}
+              {button(
+                "重新生成（调用接口）",
+                () => void generate(true),
+                false,
+                undefined,
+                aiRunning || !modelConnection.canGenerate,
+              )}
+              {aiRunning &&
+                button("停止生成", () => {
+                  aiJob.current?.controller.abort();
+                  aiJob.current = null;
+                  ++aiEpoch.current;
+                  setAIRunning(false);
+                })}
               {button("配置模型", () => go("settings"))}
             </View>
-            {small("资料会发送到所选服务，费用按服务商计算。")}
+            {small(
+              modelConnection.canGenerate
+                ? "资料会发送到所选服务，费用按服务商计算。"
+                : modelConnection.error ||
+                    "模型尚未就绪，请先在设置中连接并选择模型。",
+            )}
             {section("待核对的生成稿")}
             {input(
               aiOutput,
-              setAIOutput,
+              (v) => {
+                aiRevision.current++;
+                setAIOutput(v);
+                update((x) => ({ ...x, scriptDraft: v }));
+              },
               "生成内容可直接修改；不是权威教材。",
               true,
             )}
@@ -2020,25 +2066,35 @@ export default function App() {
               "核对后存为文稿",
               () => {
                 if (!aiOutput.trim()) return;
-                const id = uid();
-                putResource({
-                  id,
-                  title: `${aiStyle} · ${new Date().toLocaleDateString()}`,
-                  kind: "custom",
-                  generated: true,
-                  segments: aiOutput
-                    .split(/\n+/)
-                    .filter(Boolean)
-                    .map((original, i) => ({
-                      id: `${id}:${i}`,
-                      original,
-                      paragraph: i,
-                    })),
-                });
+                try {
+                  const id = uid();
+                  putResource({
+                    ...editResource(
+                      undefined,
+                      id,
+                      `${aiStyle} · ${new Date().toLocaleDateString()}`,
+                      aiOutput,
+                      uid,
+                    ),
+                    generated: true,
+                  });
+                } catch (e) {
+                  message(e);
+                  return;
+                }
                 editId && setEditId("");
                 setNotice("已保存，并标记为生成讲稿。可在我的文稿继续编辑。");
               },
               true,
+            )}
+            {section("生成历史")}
+            {(db.scriptHistory ?? []).map((h, i) =>
+              button(`载入历史 ${i + 1}`, () => {
+                aiRevision.current++;
+                setAIOutput(h.text);
+                update((v) => ({ ...v, scriptDraft: h.text }));
+                setNotice("已载入待核对稿");
+              }),
             )}
             {section("已保存的生成讲稿")}
             {resources.filter((r) => r.generated).map(row)}
@@ -2076,15 +2132,20 @@ export default function App() {
                 button(
                   n ? `${n} 分钟` : "整晚 · 手动停止",
                   () => {
+                    setStopAt(null);
                     setSleep(n);
                     setLoop(n === 0);
                   },
-                  sleep === n,
+                  !stopAt && sleep === n,
                 ),
               )}
             </View>
             {small(
-              sleep ? `当前睡眠定时：${sleep} 分钟` : "整晚循环，需手动停止",
+              stopAt
+                ? `固定截止 ${new Date(stopAt).toLocaleString()}`
+                : sleep
+                  ? `当前睡眠定时：${sleep} 分钟`
+                  : "整晚循环，需手动停止",
             )}
             {button(
               "开始睡前听读",
@@ -2120,70 +2181,43 @@ export default function App() {
               d.setHours(+m[1], +m[2], 0, 0);
               if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
               const sec = (d.getTime() - Date.now()) / 1000;
+              setStopAt(d.getTime());
               Audio.setSleepTimer(sec, 10);
-              setSleep(Math.ceil(sec / 60));
+              setSleep(0);
               setNotice("已设置停止时间");
             })}
           </>
         );
       case "settings":
         return (
-          <>
+          <View style={{ maxWidth: 800, width: "100%" }}>
             {heading("设置")}
-            {section("账号登录")}
-            {small(
-              isAccountConfigured()
-                ? "与语文、英语项目共用学习账号"
-                : ACCOUNT_UNAVAILABLE_MESSAGE,
-            )}
-            {input(
-              username,
-              setUsername,
-              "用户名",
-              false,
-              false,
-              isAccountConfigured(),
-            )}
-            {input(
-              password,
-              setPassword,
-              "密码",
-              false,
-              true,
-              isAccountConfigured(),
-            )}
-            <View style={styles.chips}>
-              {button(
-                account ? `已登录 ${account}` : "登录",
-                () =>
-                  void task("登录移动网关", async () => {
-                    if (Platform.OS === "web")
-                      throw new Error(
-                        "请在应用内登录，网页预览不会发送账号密码。",
-                      );
-                    if (!ACCOUNT_API)
-                      throw new Error(ACCOUNT_UNAVAILABLE_MESSAGE);
-                    await login(ACCOUNT_API, username, password);
-                    setAccount(username);
-                    setPassword("");
+            <AccountPanel
+              account={account}
+              colors={c}
+              onLogin={async (username, password) => {
+                if (!ACCOUNT_API) throw new Error(ACCOUNT_UNAVAILABLE_MESSAGE);
+                await login(ACCOUNT_API, username, password);
+                setAccount(username);
+                syncPreview.current = null;
+                setSyncConflict(null);
+              }}
+              onLogout={() =>
+                void task("退出登录", async () => {
+                  const result = await logout(ACCOUNT_API);
+                  if (result.localCleared) {
+                    setAccount("");
+                    syncPreview.current = null;
                     setSyncConflict(null);
-                    setNotice("已登录");
-                  }),
-                true,
-                undefined,
-                !isAccountConfigured(),
-              )}
-              {account &&
-                button(
-                  "退出",
-                  () =>
-                    void task("退出登录", async () => {
-                      await logout(ACCOUNT_API);
-                      setAccount("");
-                      setSyncConflict(null);
-                    }),
-                )}
-            </View>
+                  }
+                  setNotice(
+                    result.remoteRevoked
+                      ? "已退出"
+                      : "已在本机退出；远端撤销未完成，可稍后重试。",
+                  );
+                })
+              }
+            />
             {account && (
               <>
                 {section("同步")}
@@ -2195,56 +2229,58 @@ export default function App() {
                     "上传模板快照",
                     () =>
                       void task("上传模板", async () => {
-                        let uploaded = 0;
-                        for (const t of db.templates) {
-                          try {
-                            const remote = await syncRequest(
-                              ACCOUNT_API,
-                              `/v1/sync/templates/${encodeURIComponent(t.id)}`,
-                            );
-                            if (remote.version > 0) {
-                              setSyncConflict(remote);
-                              throw new Error(
-                                "云端已有同 ID 模板。请先查看并导入云端版本，未覆盖已有数据。",
+                        const batch = await createSyncBatch(ACCOUNT_API);
+                        syncBatch.current = batch;
+                        try {
+                          let uploaded = 0;
+                          for (const t of db.templates) {
+                            try {
+                              const remote = await batch.request(
+                                `/v1/sync/templates/${encodeURIComponent(t.id)}`,
                               );
+                              if (remote.version > 0) {
+                                syncPreview.current = batch;
+                                setSyncConflict(remote);
+                                throw new Error(
+                                  "云端已有同 ID 模板。请先查看并导入云端版本，未覆盖已有数据。",
+                                );
+                              }
+                            } catch (e) {
+                              if (!(e instanceof SyncError && e.status === 404))
+                                throw e;
                             }
-                          } catch (e) {
-                            if (!(e instanceof SyncError && e.status === 404))
-                              throw e;
+                            await batch.request(
+                              `/v1/sync/templates/${encodeURIComponent(t.id)}`,
+                              { baseVersion: 0, data: t, deleted: false },
+                              "PUT",
+                            );
+                            uploaded++;
                           }
-                          await syncRequest(
-                            ACCOUNT_API,
-                            `/v1/sync/templates/${encodeURIComponent(t.id)}`,
-                            { baseVersion: 0, data: t, deleted: false },
-                            "PUT",
+                          setNotice(
+                            `已上传 ${uploaded} 个自建模板；已有云端版本不会覆盖。`,
                           );
-                          uploaded++;
+                        } finally {
+                          batch.dispose();
+                          if (syncBatch.current === batch)
+                            syncBatch.current = null;
                         }
-                        setNotice(
-                          `已上传 ${uploaded} 个自建模板；已有云端版本不会覆盖。`,
-                        );
                       }),
                   )}
                   {button(
                     "读取云端模板",
                     () =>
                       void task("读取云端", async () => {
-                        const index = await syncRequest(
-                          ACCOUNT_API,
-                          "/v1/sync/templates",
-                        );
-                        const entries = await Promise.all(
-                          (index.items ?? [])
-                            .filter((x: { deleted: boolean }) => !x.deleted)
-                            .slice(0, 100)
-                            .map((x: { id: string }) =>
-                              syncRequest(
-                                ACCOUNT_API,
-                                `/v1/sync/templates/${encodeURIComponent(x.id)}`,
-                              ),
-                            ),
-                        );
-                        setSyncConflict(entries);
+                        const batch = await createSyncBatch(ACCOUNT_API);
+                        syncBatch.current = batch;
+                        try {
+                          const entries = await readAllTemplates(batch);
+                          syncPreview.current = batch;
+                          setSyncConflict(entries);
+                        } finally {
+                          batch.dispose();
+                          if (syncBatch.current === batch)
+                            syncBatch.current = null;
+                        }
                       }),
                   )}
                 </View>
@@ -2257,26 +2293,31 @@ export default function App() {
                       true,
                     )}
                     {button("导入云端模板，保留本机模板", () => {
-                      try {
-                        const entries = Array.isArray(syncConflict)
-                          ? syncConflict
-                          : [syncConflict];
-                        const imported = entries.map((raw) => {
-                          const data = (raw as { data: unknown }).data;
-                          return {
-                            ...parseTemplate(JSON.stringify(data)),
-                            id: uid(),
-                          };
-                        });
-                        update((v) => ({
-                          ...v,
-                          templates: [...v.templates, ...imported],
-                        }));
-                        setSyncConflict(null);
-                        setNotice("已作为新模板导入，保留本机版本。");
-                      } catch (e) {
-                        message(e);
-                      }
+                      void task("导入云端模板", async () => {
+                        try {
+                          if (!syncPreview.current)
+                            throw new Error("请重新读取云端模板");
+                          await syncPreview.current.check();
+                          const entries = Array.isArray(syncConflict)
+                            ? syncConflict
+                            : [syncConflict];
+                          const imported = entries.map((raw) => {
+                            const data = (raw as { data: unknown }).data;
+                            return {
+                              ...parseTemplate(JSON.stringify(data)),
+                              id: uid(),
+                            };
+                          });
+                          update((v) => ({
+                            ...v,
+                            templates: [...v.templates, ...imported],
+                          }));
+                          setSyncConflict(null);
+                          setNotice("已作为新模板导入，保留本机版本。");
+                        } catch (e) {
+                          message(e);
+                        }
+                      });
                     })}
                   </>
                 )}
@@ -2293,9 +2334,15 @@ export default function App() {
                 ),
               )}
             </View>
+            <DataPanel
+              db={db}
+              colors={c}
+              report={setNotice}
+              onChange={replaceLibrary}
+            />
             {section("关于")}
 
-            {small("版本 0.2.0")}
+            {small(`版本 ${version}`)}
             <View style={styles.chips}>
               {button(
                 "源代码与构建文档",
@@ -2305,7 +2352,7 @@ export default function App() {
                   ),
               )}
             </View>
-          </>
+          </View>
         );
     }
   }
@@ -2374,6 +2421,7 @@ export default function App() {
         miniPlayer={miniPlayer}
       >
         <ScrollView
+          ref={pageScroll}
           contentContainerStyle={{
             padding: wide ? 32 : 20,
             paddingBottom: 32,
@@ -2395,11 +2443,22 @@ export default function App() {
                 </Text>
               </Pressable>
             )}
-            {busy !== "" && (
+            {(status.preparing || preparation) &&
+              small(
+                status.preparing
+                  ? `音频准备 ${status.preparedCount ?? 0}/${status.totalSteps ?? 0} · 缓存命中 ${status.cachedCount ?? 0}`
+                  : `外部准备 ${preparation!.done}/${preparation!.total} · 命中 ${preparation!.cached} · 失败 ${preparation!.failedIds.length}`,
+              )}
+            {!!preparation?.failedIds.length&&small(`已改用系统声音：${preparation.failedIds.slice(0,5).map(id=>sourcePlan.current?.steps.find(s=>s.id===id)?.text?.slice(0,36)??'朗读片段').join('；')}${preparation.failedIds.length>5?'…':''}`)}
+            {syncBatch.current &&
+              button("停止同步", () => syncBatch.current?.cancel())}
+            {tasks.length > 0 && (
               <View style={[styles.inline, { marginBottom: 20 }]}>
                 <ActivityIndicator color={c.text} />
-                <Text style={{ color: c.muted, flex: 1 }}>{busy}</Text>
-                {/本地音频|完整播放列表/.test(busy) &&
+                <Text style={{ color: c.muted, flex: 1 }}>
+                  {tasks.join(" · ")}
+                </Text>
+                {audioBusy &&
                   button("停止准备", () => {
                     audioPreparation.current++;
                     audioAbort.current?.abort();
@@ -2446,7 +2505,7 @@ const styles = StyleSheet.create({
   eyebrow: { fontSize: 11, letterSpacing: 0.2, fontWeight: "500" },
   subtitle: { fontSize: 15, lineHeight: 25, marginTop: 9, maxWidth: 700 },
   hero: {
-    padding: 30,
+    padding: 24,
     borderRadius: 14,
     flexDirection: "row",
     gap: 24,
@@ -2508,37 +2567,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  playerColumns: { gap: 0 },
-  cover: { borderRadius: 9, padding: 29, overflow: "hidden" },
-  coverRule: {
-    borderWidth: StyleSheet.hairlineWidth,
-    flex: 1,
-    padding: 25,
-    justifyContent: "center",
-  },
-  transport: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-    marginVertical: 24,
-  },
-  playCircle: {
-    height: 76,
-    width: 76,
-    borderRadius: 38,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  transcript: {
-    marginTop: 13,
-    paddingVertical: 18,
-    paddingLeft: 19,
-    paddingRight: 12,
-    borderLeftWidth: 3,
-    borderRadius: 3,
-  },
-  step: { borderBottomWidth: 1, paddingVertical: 22 },
   mini: {
     minHeight: 78,
     borderTopWidth: StyleSheet.hairlineWidth,

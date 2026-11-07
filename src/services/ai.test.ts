@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBase, modelApiBase, generateScript, listModels } from "./ai";
+import {
+  apiBase,
+  modelApiBase,
+  generateScript,
+  generateCachedScript,
+  listModels,
+} from "./ai";
 
 const settings = {
   base: "https://language.example/v1/",
@@ -245,4 +251,45 @@ describe("AI provider boundary", () => {
     ).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+});
+
+it("deduplicates an in-flight generation and does not cache a cancelled late result", async () => {
+  let complete!: (v: Response) => void;
+  fetchMock.mockImplementationOnce(
+    () =>
+      new Promise<Response>((r) => {
+        complete = r;
+      }),
+  );
+  const config = {
+      base: "https://tasks.example/v1",
+      model: "task-model",
+      key: "",
+    },
+    controller = new AbortController();
+  const first = generateCachedScript(
+      config,
+      "dedupe source",
+      "style",
+      "prompt",
+      false,
+      controller.signal,
+    ),
+    second = generateCachedScript(config, "dedupe source", "style", "prompt");
+  expect(fetchMock).toHaveBeenCalledOnce();
+  complete(
+    new Response(
+      JSON.stringify({ choices: [{ message: { content: "result" } }] }),
+    ),
+  );
+  expect((await first).text).toBe("result");
+  expect((await second).text).toBe("result");
+  let late!:(r:Response)=>void;
+  fetchMock.mockImplementationOnce(()=>new Promise<Response>(r=>{late=r;}));
+  const stale=generateCachedScript(config,'dedupe source','style','prompt',true,controller.signal);
+  const cancelled=expect(stale).rejects.toThrow();controller.abort();await cancelled;
+  fetchMock.mockResolvedValueOnce(success({choices:[{message:{content:'new result'}}]}));
+  expect((await generateCachedScript(config,'dedupe source','style','prompt',true)).text).toBe('new result');
+  late(success({choices:[{message:{content:'late old result'}}]}));
+  expect((await generateCachedScript(config,'dedupe source','style','prompt')).text).toBe('new result');
 });

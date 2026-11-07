@@ -56,6 +56,12 @@ export async function prepareExternalAudio(
   settings: TTSSettings,
   consent: TTSConsent | null,
   signal?: AbortSignal,
+  onProgress?: (progress: {
+    done: number;
+    total: number;
+    cached: number;
+    failedIds: string[];
+  }) => void,
 ): Promise<{ plan: AudioPlan; warnings: string[] }> {
   const isExternal = (s: AudioStep) =>
     s.kind === "speech" && s.voiceId?.startsWith("remote:");
@@ -107,7 +113,19 @@ export async function prepareExternalAudio(
     throw new Error("语音编排过长，请分成多个列表");
   const steps: AudioStep[] = [],
     assets = new Map<string, string>();
-  let failed = false;
+  let failed = false,
+    done = 0,
+    cachedCount = 0;
+  const failedIds: string[] = [];
+  const total = groups.filter((x) => isExternal(x.original)).length;
+  const progress = () =>
+    onProgress?.({
+      done,
+      total,
+      cached: cachedCount,
+      failedIds: [...failedIds],
+    });
+  progress();
   for (const { original, parts } of groups) {
     check(signal);
     if (!isExternal(original)) {
@@ -116,6 +134,9 @@ export async function prepareExternalAudio(
     }
     if (failed) {
       steps.push(localFallback(original));
+      failedIds.push(original.id);
+      done++;
+      progress();
       continue;
     }
     try {
@@ -138,6 +159,7 @@ export async function prepareExternalAudio(
           check(signal);
           uri = cached?.uri;
         }
+        if (uri) cachedCount++;
         if (!uri) {
           const audio = await synthesizeSpeech(
             { ...settings, voice },
@@ -158,7 +180,10 @@ export async function prepareExternalAudio(
       check(signal);
       failed = true;
       steps.push(localFallback(original));
+      failedIds.push(original.id);
     }
+    done++;
+    progress();
   }
   return {
     plan: { ...plan, steps },

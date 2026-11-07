@@ -1,15 +1,16 @@
+import { version } from "./package.json";
 import type { ExpoConfig } from "expo/config";
 const config: ExpoConfig = {
   name: "Noxia",
   icon: "./assets/noxia-icon.png",
   slug: "noxia",
-  version: "0.2.0",
+  version,
   orientation: "default",
   scheme: "noxia",
   userInterfaceStyle: "automatic",
   ios: {
     supportsTablet: true,
-    buildNumber: "2",
+    buildNumber: "3",
     bundleIdentifier: "com.noxia.app",
     infoPlist: {
       UIBackgroundModes: ["audio"],
@@ -24,7 +25,7 @@ const config: ExpoConfig = {
     },
   },
   android: { package: "com.noxia.app" },
-  web: { bundler: "metro", name: "Noxia" },
+  web: { bundler: "metro", name: "Noxia", favicon: "./assets/noxia-icon.png" },
   plugins: ["expo-dev-client", "expo-secure-store", "expo-document-picker"],
   extra: {
     services: { accountApi: process.env.EXPO_PUBLIC_ACCOUNT_API || "" },

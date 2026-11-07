@@ -241,8 +241,10 @@ describe("mobile session and origin binding", () => {
       }),
     );
     const pendingLogout = logout(base);
-    const rejected =
-      expect(pendingLogout).rejects.toThrow("本次同步结果已忽略");
+    const rejected = expect(pendingLogout).resolves.toMatchObject({
+      localCleared: false,
+      remoteRevoked: false,
+    });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     // Even on the same origin, a different token/account belongs to B.
     fetchMock.mockResolvedValueOnce(
@@ -261,14 +263,61 @@ describe("mobile session and origin binding", () => {
   it("clears local secrets even when logout is offline or the address was changed", async () => {
     session();
     fetchMock.mockRejectedValueOnce(new TypeError("offline"));
-    await expect(logout(base)).rejects.toThrow("offline");
+    await expect(logout(base)).resolves.toEqual({
+      localCleared: true,
+      remoteRevoked: false,
+    });
     expect(secrets.size).toBe(0);
     session();
     fetchMock.mockClear();
-    await expect(logout("https://different.example")).rejects.toThrow(
-      "请先登录",
-    );
+    await expect(logout("https://different.example")).resolves.toEqual({
+      localCleared: true,
+      remoteRevoked: false,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(secrets.size).toBe(0);
   });
+});
+
+it("follows every next cursor and stops an old batch between requests after switching accounts", async () => {
+  const { createSyncBatch, readAllTemplates } = await import("./sync");
+  session();
+  const batch = await createSyncBatch(base);
+  fetchMock
+    .mockResolvedValueOnce(
+      success({ items: [{ id: "one", deleted: false }], next: "one" }),
+    )
+    .mockResolvedValueOnce(success({ data: { id: "one" } }))
+    .mockResolvedValueOnce(
+      success({ items: [{ id: "two", deleted: false }], next: null }),
+    )
+    .mockResolvedValueOnce(success({ data: { id: "two" } }));
+  expect(await readAllTemplates(batch)).toHaveLength(2);
+  expect(fetchMock.mock.calls.map((x) => x[0])).toContain(
+    `${base}/v1/sync/templates?after=one`,
+  );
+  secrets.set("sync-account", "replacement");
+  const count = fetchMock.mock.calls.length;
+  await expect(batch.request("/v1/sync/templates")).rejects.toThrow(
+    "旧同步批次",
+  );
+  expect(fetchMock).toHaveBeenCalledTimes(count);
+});
+
+it("pins request credentials to the original batch even if account changes while secrets are read", async () => {
+  const { createSyncBatch } = await import("./sync");
+  session();
+  const batch = await createSyncBatch(base);
+  fetchMock.mockImplementationOnce(async (_url, options) => {
+    expect(options.headers["X-Account-ID"]).toBe(account);
+    secrets.set("sync-account", "other-account");
+    return success({ items: [], next: null });
+  });
+  await expect(batch.request("/v1/sync/templates")).rejects.toThrow(
+    "账号已变更",
+  );
+  expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+    `Bearer ${token}`,
+  );
+  batch.dispose();
 });

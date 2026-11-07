@@ -123,6 +123,8 @@ private final class AudioEngine {
   private var preparing = false
   private var externalWrites = 0
   private var cachedCount = 0
+  private var preparedCount = 0
+  private var totalSteps = 0
   private var errorMessage: String?
   private var playbackRate: Float = 1
   private var wantsPlayback = false
@@ -286,6 +288,8 @@ private final class AudioEngine {
     let token = generation
     preparing = true
     cachedCount = 0
+    preparedCount = 0
+    totalSteps = nextPlan.steps.count
     errorMessage = nil
     emit()
     defer { preparing = false; emit() }
@@ -374,6 +378,7 @@ private final class AudioEngine {
         cursor = CMTimeAdd(cursor, assetDuration)
         guard cursor.seconds <= 8 * 3600 else { throw AudioFailure.message("单次播放计划超过 8 小时，请拆分内容。") }
         nextRanges.append((start: start, end: cursor.seconds))
+        preparedCount = nextRanges.count
         emit()
       }
       guard generation == token else { throw CancellationError() }
@@ -581,7 +586,7 @@ private final class AudioEngine {
     var resourceStart = 0.0
     var resourceEnd = duration
     var result: [String: Any] = ["playing": player.rate != 0, "position": position, "duration": duration,
-      "stepIndex": stepIndex, "preparing": preparing, "cachedCount": cachedCount]
+      "stepIndex": stepIndex, "preparing": preparing, "cachedCount": cachedCount, "preparedCount": preparedCount, "totalSteps": totalSteps]
     if let errorMessage { result["error"] = errorMessage }
     if let plan, stepIndex < plan.steps.count, let resourceId = plan.steps[stepIndex].resourceId {
       result["resourceId"] = resourceId

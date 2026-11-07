@@ -1,11 +1,18 @@
+export { toSyncEntity, fromSyncEntity } from "../../shared/sync-protocol.mjs";
+import { timedSignal, abortable } from "./abort";
 import { apiBase } from "./ai";
 import { getSecret, setSecret } from "./storage";
 
 // SecureStore has no multi-key compare-and-delete. Serialize this service's
 // session writes so login cannot interleave with a logout's check and removal.
+const batches = new Set<AbortController>();
 let sessionWrites: Promise<void> = Promise.resolve();
 function updateSession(action: () => Promise<void>): Promise<void> {
-  const next = sessionWrites.then(action);
+  const next = sessionWrites.then(() => {
+    batches.forEach((x) => x.abort());
+    batches.clear();
+    return action();
+  });
   sessionWrites = next.catch(() => {});
   return next;
 }
@@ -35,47 +42,72 @@ export async function syncRequest(
   path: string,
   body?: unknown,
   method?: string,
+  binding?: {
+    token: string;
+    accountId: string;
+    origin: string;
+    signal: AbortSignal;
+  },
 ) {
   const endpoint = apiBase(base);
   if (!path.startsWith("/v1/") || path.includes(".."))
     throw new Error("不受支持的同步路径");
   const isLogin = path === "/v1/auth/login";
-  const [token, accountId, origin] = await Promise.all([
+  const credentials = await Promise.all([
     getSecret("sync-token"),
     getSecret("sync-account"),
     getSecret("sync-origin"),
   ]);
+  const [token, accountId, origin] = binding
+    ? [binding.token, binding.accountId, binding.origin]
+    : credentials;
+  if (
+    binding &&
+    (binding.signal.aborted ||
+      credentials.some((x, i) => x !== [token, accountId, origin][i]))
+  )
+    throw new Error("账号已变更，旧同步批次已停止");
   if (!isLogin && (!token || !accountId || origin !== endpoint))
     throw new Error("请先登录账号后再同步。本机内容仍保存在此设备。");
-  const r = await fetch(`${endpoint}${path}`, {
-    method: method ?? (body ? "POST" : "GET"),
-    headers: {
-      "Content-Type": "application/json",
-      ...(!isLogin
-        ? { Authorization: `Bearer ${token}`, "X-Account-ID": accountId! }
-        : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(20000),
-  });
-  const result = r.ok ? await r.json() : undefined;
-  if (!isLogin) {
-    // Fetch and JSON decoding both yield. A response belongs only to the exact
-    // session that started it, even if the account changes while awaiting it.
-    const [currentToken, currentAccount, currentOrigin] = await Promise.all([
-      getSecret("sync-token"),
-      getSecret("sync-account"),
-      getSecret("sync-origin"),
-    ]);
-    if (
-      currentToken !== token ||
-      currentAccount !== accountId ||
-      currentOrigin !== origin
-    )
-      throw new Error("账号已变更，本次同步结果已忽略。本机内容已保留。");
+  const lifetime = timedSignal(binding?.signal, 20000);
+  try {
+    const r = await abortable(
+      fetch(`${endpoint}${path}`, {
+        method: method ?? (body ? "POST" : "GET"),
+        headers: {
+          "Content-Type": "application/json",
+          ...(!isLogin
+            ? { Authorization: `Bearer ${token}`, "X-Account-ID": accountId! }
+            : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: lifetime.signal,
+      }),
+      lifetime.signal,
+    );
+    const result = r.ok
+      ? await abortable(r.json(), lifetime.signal)
+      : undefined;
+    if (!isLogin) {
+      // Fetch and JSON decoding both yield. A response belongs only to the exact
+      // session that started it, even if the account changes while awaiting it.
+      const [currentToken, currentAccount, currentOrigin] = await Promise.all([
+        getSecret("sync-token"),
+        getSecret("sync-account"),
+        getSecret("sync-origin"),
+      ]);
+      if (
+        currentToken !== token ||
+        currentAccount !== accountId ||
+        currentOrigin !== origin
+      )
+        throw new Error("账号已变更，本次同步结果已忽略。本机内容已保留。");
+    }
+    if (!r.ok) throw new SyncError(r.status, isLogin);
+    return result;
+  } finally {
+    lifetime.dispose();
   }
-  if (!r.ok) throw new SyncError(r.status, isLogin);
-  return result;
 }
 export async function login(base: string, username: string, password: string) {
   const endpoint = apiBase(base);
@@ -102,8 +134,12 @@ export async function logout(base: string) {
     getSecret("sync-account"),
     getSecret("sync-origin"),
   ]);
+  let remoteRevoked = !original[0],
+    localCleared = false;
   try {
-    if (base) await syncRequest(base, "/v1/auth/logout", {}, "POST");
+    if (base) {await syncRequest(base, "/v1/auth/logout", {}, "POST");remoteRevoked=true;}
+  } catch {
+    remoteRevoked = false;
   } finally {
     await updateSession(async () => {
       const current = await Promise.all([
@@ -117,7 +153,76 @@ export async function logout(base: string) {
         await setSecret("sync-token", "");
         await setSecret("sync-account", "");
         await setSecret("sync-origin", "");
+        localCleared = true;
       }
     });
   }
+  return { localCleared, remoteRevoked };
+}
+
+/** A batch belongs to the exact account/session it captured, including between requests. */
+export async function createSyncBatch(base: string) {
+  const original = await Promise.all(
+    ["sync-token", "sync-account", "sync-origin"].map(getSecret),
+  );
+  if (!original[0] || !original[1] || original[2] !== apiBase(base))
+    throw new Error("请先登录");
+  const controller = new AbortController();
+  batches.add(controller);
+  async function check() {
+    const now = await Promise.all(
+      ["sync-token", "sync-account", "sync-origin"].map(getSecret),
+    );
+    if (controller.signal.aborted || now.some((x, i) => x !== original[i]))
+      throw new Error("账号已变更，旧同步批次已停止");
+  }
+  return {
+    accountId: original[1],
+    cancel: () => {
+      controller.abort();
+      batches.delete(controller);
+    },
+    dispose: () => batches.delete(controller),
+    check,
+    request: async (path: string, body?: unknown, method?: string) => {
+      await check();
+      const result = await syncRequest(base, path, body, method, {
+        token: original[0]!,
+        accountId: original[1]!,
+        origin: original[2]!,
+        signal: controller.signal,
+      });
+      await check();
+      return result;
+    },
+  };
+}
+export async function readAllTemplates(
+  batch: Awaited<ReturnType<typeof createSyncBatch>>,
+) {
+  const entries: unknown[] = [];
+  const seen = new Set<string>();
+  let cursor = "";
+  do {
+    const page = await batch.request(
+      `/v1/sync/templates${cursor ? `?after=${encodeURIComponent(cursor)}` : ""}`,
+    );
+    if (
+      !Array.isArray(page.items) ||
+      (page.next !== null && typeof page.next !== "string")
+    )
+      throw new Error("云端分页格式异常");
+    for (const item of page.items)
+      if (!item.deleted)
+        entries.push(
+          await batch.request(
+            `/v1/sync/templates/${encodeURIComponent(item.id)}`,
+          ),
+        );
+    cursor = page.next ?? "";
+    if (cursor && seen.has(cursor)) throw new Error("云端分页游标重复");
+    seen.add(cursor);
+  } while (cursor);
+  await batch.check();
+  return entries;
 }

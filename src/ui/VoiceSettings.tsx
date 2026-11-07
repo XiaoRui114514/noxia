@@ -29,6 +29,8 @@ export type VoiceSettingsProps = {
   onRefresh: () => void;
   onPreviewSystem: (voice: Voice) => void;
   onPreviewExternal: (settings: TTSSettings, consent: TTSConsent) => void;
+  dictionaryState: string;
+  onSaveDictionary: () => void;
   dictionary: string;
   onDictionaryChange: (value: string) => void;
 };
@@ -53,6 +55,8 @@ export function VoiceSettings({
   onRefresh,
   onPreviewSystem,
   onPreviewExternal,
+  dictionaryState,
+  onSaveDictionary,
   dictionary,
   onDictionaryChange,
 }: VoiceSettingsProps) {
@@ -521,6 +525,10 @@ export function VoiceSettings({
         <Text style={helpStyle}>
           每行“原词=朗读文字”，只影响朗读，不改原文；接口音色的读音由服务决定。
         </Text>
+        <Text style={{ color: c.muted }}>
+          {dictionaryState || "每行 原词=读音；保存后生效"}
+        </Text>
+        {button("保存词典", onSaveDictionary)}
         {input("词典", dictionary, onDictionaryChange, {
           multiline: true,
           placeholder: "原词=朗读文字",

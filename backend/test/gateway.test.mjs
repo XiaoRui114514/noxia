@@ -135,3 +135,47 @@ describe('versioned offline-safe entities', () => {
     expect((await write(token)).status).toBe(429); expect(dataDB.prepare('SELECT count(*) AS n FROM noxia_entities').get().n).toBe(0);
   });
 });
+
+it("accepts real client playlist/history structures through the wire conversion", async () => {
+  const { toSyncEntity, fromSyncEntity } =
+    await import("../../shared/sync-protocol.mjs");
+  const token = await login();
+  const playlist = {
+    id: "client-list",
+    name: "我的列表",
+    resourceIds: ["a", "b"],
+    options: { a: { templateId: "t", voiceId: "v", rate: 1.25 } },
+  };
+  const history = {
+    resourceId: "a",
+    title: "篇目",
+    position: 12,
+    date: "2026-11-07T00:00:00Z",
+    completed: false,
+  };
+  for (const [collection, data, id] of [
+    ["playlists", playlist, playlist.id],
+    ["history", history, "history-a"],
+  ]) {
+    const wire = toSyncEntity(collection, data, id);
+    const out = await call(`/v1/sync/${collection}/${id}`, {
+      method: "PUT",
+      token,
+      body: { baseVersion: 0, deleted: false, data: wire },
+    });
+    expect(out.status).toBe(200);
+    const decoded = fromSyncEntity(collection, out.body.data);
+    if (collection === "playlists")
+      expect(decoded).toEqual({
+        ...playlist,
+        options: { a: playlist.options.a, b: {} },
+      });
+    else
+      expect(decoded).toMatchObject({
+        resourceId: "a",
+        position: 12,
+        date: history.date,
+        completed: false,
+      });
+  }
+});

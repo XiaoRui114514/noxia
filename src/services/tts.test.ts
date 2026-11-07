@@ -116,9 +116,9 @@ describe("explicit TTS provider boundary", () => {
       consent,
       controller.signal,
     );
-    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).not.toBe(controller.signal);
     controller.abort();
-    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(false); // Completed requests release the parent listener.
   });
 
   it("permits an explicitly configured keyless self-hosted service without an empty auth header", async () => {
@@ -332,4 +332,56 @@ describe("system voice metadata", () => {
     expect(normalizeVoiceGender("FEMALE")).toBe("female");
     expect(normalizeVoiceGender("guessed")).toBe("unknown");
   });
+});
+
+it("combines manual cancellation and the default timeout across fetch and body download", async () => {
+  vi.useFakeTimers();
+  try {
+    const parent = new AbortController();
+    fetchMock.mockImplementationOnce(() => new Promise(() => {}));
+    const pending = synthesizeSpeech(
+      settings,
+      { text: "请求超时" },
+      consent,
+      parent.signal,
+    );
+    const checked = expect(pending).rejects.toThrow("超时");
+    await vi.advanceTimersByTimeAsync(90000);
+    await checked;
+    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(parent.signal.aborted).toBe(false);
+    let cancelled = false;
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "content-type": "audio/mpeg" } },
+      ),
+    );
+    const download = synthesizeSpeech(
+      settings,
+      { text: "下载超时" },
+      consent,
+      parent.signal,
+    );
+    const rejected = expect(download).rejects.toThrow("下载失败");
+    await vi.advanceTimersByTimeAsync(90000);
+    await rejected;
+    expect(cancelled).toBe(true);
+    fetchMock.mockImplementationOnce(() => new Promise(() => {}));
+    const manual = synthesizeSpeech(
+      settings,
+      { text: "手动停止" },
+      consent,
+      parent.signal,
+    );
+    const stopped = expect(manual).rejects.toThrow();
+    parent.abort();
+    await stopped;
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -120,7 +120,7 @@ export function compileSession(
       : `${prepared[0].plan.title.slice(0, 120)} 等 ${prepared.length} 篇`;
   const loop = options.loop ?? false;
   // A short, deterministic identity for resume state, not a security or audio-cache hash.
-  const id = `session-${shortIdentity(JSON.stringify({ steps, loop }))}`;
+  const id = `session-${shortIdentity(JSON.stringify({ steps, loop, templates: ordered.map(e=>e.template.id), selections: ordered.map(e=>e.selectedIds) }))}`;
   return {
     id,
     title,

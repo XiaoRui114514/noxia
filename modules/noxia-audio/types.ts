@@ -30,6 +30,8 @@ export type AudioStatus = {
   stepIndex: number;
   cachedCount?: number;
   preparing?: boolean;
+  preparedCount?: number;
+  totalSteps?: number;
   error?: string;
   resourceId?: string;
   /** Progress inside the current contiguous resource block, in seconds. */
