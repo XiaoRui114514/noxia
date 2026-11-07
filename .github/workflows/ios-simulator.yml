@@ -18,8 +18,8 @@ jobs:
       EXPO_NO_TELEMETRY: '1'
       COCOAPODS_DISABLE_STATS: 'true'
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -47,6 +47,11 @@ jobs:
           pod install 2>&1 | tee ../pod-install.log
       - name: Verify workspace and scheme
         run: xcodebuild -list -workspace ios/Noxia.xcworkspace
+      - name: Prepare real iPad UI integration target
+        run: |
+          ruby -e "require 'xcodeproj'" || gem install xcodeproj -v 1.27.0 --no-document --user-install
+          ruby -c scripts/add-ios-ui-tests.rb
+          ruby scripts/add-ios-ui-tests.rb
       - name: Compile unsigned iPad simulator app
         run: |
           set -o pipefail
@@ -58,19 +63,64 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build/ios-simulator \
             -resultBundlePath build/Noxia-Simulator.xcresult \
+            ARCHS="$(uname -m)" \
+            ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build 2>&1 | tee xcodebuild.log
+      - name: Package simulator-only application
+        id: package_simulator
+        run: |
+          mkdir -p build/artifacts
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/ios-simulator/Build/Products/Release-iphonesimulator/Noxia.app \
+            build/artifacts/Noxia-iOS-Simulator.zip
+          cat > build/artifacts/README.txt <<'NOTE'
+          Noxia-iOS-Simulator.zip contains an unsigned iOS Simulator application.
+          It cannot be installed on a physical iPad or uploaded to TestFlight.
+          Use a Mac with a compatible Xcode iOS Simulator to run this artifact.
+          Physical iPad installation still requires an appropriate signed build.
+          NOTE
+      - name: Launch Release app in a disposable iPad simulator
+        timeout-minutes: 8
+        run: bash scripts/ios-simulator-smoke.sh
+      - name: Exercise Apple speech and background progress in iPad UI
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          python3 scripts/run-ios-ui-test.py 2>&1 | tee ios-uitests.log
+      - name: Export real UI test screenshots and summary
+        if: always()
+        run: |
+          if [[ -d build/Noxia-UITests.xcresult ]]; then
+            xcrun xcresulttool export attachments --path build/Noxia-UITests.xcresult --output-path build/ios-ui-attachments
+            xcrun xcresulttool get test-results summary --path build/Noxia-UITests.xcresult > build/ios-ui-test-summary.json
+          fi
+      - name: Retain simulator-only application
+        if: ${{ always() && steps.package_simulator.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Noxia-iOS-Simulator-only
+          path: build/artifacts/
+          retention-days: 7
+          if-no-files-found: error
       - name: Retain build diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-simulator-diagnostics
           path: |
             pod-install.log
             xcodebuild.log
             build/Noxia-Simulator.xcresult
+            build/ios-smoke/
+            ios-uitests.log
+            build/Noxia-UITests.xcresult
+            build/ios-ui-test/
+            build/ios-ui-attachments/
+            build/ios-ui-test-summary.json
           retention-days: 7
           if-no-files-found: ignore
-# This job verifies native compilation only. It cannot verify physical-device background audio,
-# lock-screen controls, interruptions, signing, installation on iPad, or App Store eligibility.
+# This job verifies native compilation and bounded simulator startup, with a real PNG for review.
+# It cannot verify physical-device background audio, lock-screen controls, interruptions,
+# signing, installation on iPad, or App Store eligibility. Simulator ZIPs are not iPad installers.

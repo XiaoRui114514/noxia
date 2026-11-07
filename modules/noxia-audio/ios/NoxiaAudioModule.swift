@@ -47,6 +47,7 @@ private final class SpeechRenderer: NSObject, AVSpeechSynthesizerDelegate {
     synthesizer.delegate = self
   }
 
+  @MainActor
   func render(_ utterance: AVSpeechUtterance, to url: URL) async throws {
     guard completion == nil else { throw AudioFailure.message("A speech render is already running.") }
     generation += 1
@@ -187,6 +188,7 @@ private final class AudioEngine {
     }
   }
 
+  @MainActor
   func prepare(_ dictionary: [String: Any]) async throws -> [String: Any] {
     guard !preparing else { throw AudioFailure.message("正在准备语音，请先停止或等待完成。") }
     let data = try JSONSerialization.data(withJSONObject: dictionary)
@@ -353,7 +355,7 @@ private final class AudioEngine {
   }
 
   func play() {
-    guard player.currentItem != nil, !preparing else { return }
+    guard let item = player.currentItem, !preparing else { return }
     if sleepExpired { finishSleep(); return }
     do {
       let session = AVAudioSession.sharedInstance()
@@ -362,7 +364,23 @@ private final class AudioEngine {
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
       wantsPlayback = true
-      if position >= duration - 0.05 { seek(0) }
+      if position >= duration - 0.05 {
+        let token = generation
+        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] completed in
+          DispatchQueue.main.async {
+            guard let self, completed, self.wantsPlayback, !self.preparing,
+                  self.generation == token, self.player.currentItem === item else { return }
+            if self.sleepExpired { self.finishSleep(); return }
+            // A seek is asynchronous. Start only after it succeeds, and do not
+            // recursively call play(): a very short item may still meet its EOF threshold.
+            self.player.playImmediately(atRate: self.playbackRate)
+            self.scheduleSleepBoundary()
+            self.updateNowPlaying()
+            self.emit()
+          }
+        }
+        return
+      }
       player.playImmediately(atRate: playbackRate)
       scheduleSleepBoundary()
       updateNowPlaying()

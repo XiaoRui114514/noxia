@@ -2,7 +2,7 @@
 
 iPadOS 优先的学习听读与主动回忆应用。把文稿、翻译、重复和留白编排成自己的复习节奏。
 
-**当前为 0.1 开发版，未达到全部产品验收。** 可运行 Web 交互版；iOS 原生系统语音缓存、后台播放器及移动账号扩展已有实现，但需要 Apple 构建与 iPad 实测。没有提供已签名 IPA，不声称锁屏播放已验证。仓库目前保持私有；GitHub 链接和克隆需要拥有访问权限。用户已创建仓库，原生编译结果以 Actions 实际运行为准。不要用 Expo Go 验收原生音频。
+**当前为 0.1 开发版，未达到全部产品验收。** 可运行 Web 交互版；iOS 原生系统语音缓存、后台播放器及移动账号扩展已有实现，初版已通过 macOS 的原生 Release 模拟器构建，仍需 iPad 实测。没有提供已签名 IPA，不声称锁屏播放已验证。仓库目前保持私有；GitHub 链接和克隆需要拥有访问权限。用户已创建仓库，原生编译结果以 Actions 实际运行为准。不要用 Expo Go 验收原生音频。
 
 ![iPad 横屏播放器的浏览器尺寸预览](docs/screenshots/player-landscape.png)
 
@@ -120,7 +120,7 @@ npm run check
 本次可重现验证记录见 [开发进度](docs/status.md)；CI 结果以 [Actions](https://github.com/XiaoRui114514/noxia/actions) 为准。
 
 - 真机安装、系统语音听感、长时间锁屏播放、耳机、系统中断、多音频输出、断网／内存、Dynamic Type、VoiceOver、Stage Manager 与多窗口均待真机测试。布局只是用浏览器按 iPad 尺寸检查。
-- 原生 Swift 尚需远程构建验证；源码审阅和 autolinking 成功不等于可安装。
+- 原生 Swift 已通过 [首次远程 Release 构建](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976)（Xcode 26.6 / Swift 6.3.3）。无签名模拟器应用不能安装到实体 iPad，启动及音频测试见后续 Actions。
 - 完整播放列表与留白先准备为原生时间线，跨篇不依赖前台 JavaScript；其后台表现仍未真机验证。首次合成须保持前台。
 - 已实现每条独立模板／音色／语速、随机顺序、全篇／全列表 1—20 次及循环。单句／单段循环通过选句和循环组合；没有独立的多层循环面板。
 - PDF 提取、扫描 OCR、录音背诵、ASR、开源模型端侧推理、付费 TTS provider、云音频以及真正的多窗口 scene 尚未实现。

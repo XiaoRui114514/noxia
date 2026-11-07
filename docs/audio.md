@@ -4,6 +4,8 @@
 
 `modules/noxia-audio` 是本地 Expo Module。iPad/iPhone 使用 Apple `AVSpeechSynthesizer.write` 将各个朗读步骤逐一生成为 Application Support/Noxia/Audio 下的 PCM CAF 文件，再用 `AVMutableComposition` 拼出精确的播放时间线，交给 `AVPlayer` 播放。留白是实际的 PCM 静音音频，因此留白和重复都在原生媒体时间线上，不靠页面的 JavaScript 定时器推进。每次准备上限为 1000 步、15 万字、8 小时；单次留白不超过 10 分钟。首个版本在完整计划准备完后才播放，长列表首次生成可能需要较长时间。
 
+异步的计划准备与系统语音渲染方法显式标记 `@MainActor`；包括等待音轨/时长加载之后，状态与 composition 的后续修改仍回到主 actor。同步桥接入口及音频回调也统一在主线程执行，避免仅在外层 Task 标主 actor、内部未隔离的 async 方法却切换到其他 executor 所产生的状态竞争。音频缓冲分批写盘，不在内存中累积整段 PCM。
+
 系统已安装声音无需购买 Noxia 的 TTS 套餐，不向 Noxia 后端上传文字。实际声音清晰度、中文多音字及中英混读效果需要用户试听；未宣称达到商业云声音质量。高质量系统声音可能需要用户先在 iPad「设置 → 辅助功能 → 朗读内容 → 声音」下载。声音列表和可用质量以设备为准；不附带或重新分发 Apple 声音文件。
 
 缓存键是 SHA-256，覆盖原文字、应用读音替换后的文字、系统语音实现版本、OS 版本、声音 identifier、有效合成语速、音量和完整读音字典。重复次数不进入键，同一句重复播放只引用同一份音频。CAF 是 Apple 支持的 PCM 容器，此处没有伪称输出 MP3 或 WAV。读音替换仅用于朗读，保留原文；它是文字替换，不是语言学级别的音素字典。
@@ -22,6 +24,8 @@
 
 播放进度由原生播放器每 2 秒存储轻量恢复标记，重新准备相同 plan id 时恢复。App 完全退出后不会自动在后台重新启动播放；用户重开 App 并选择内容后恢复。突然终止可能丢失最后约 2 秒进度。现阶段只持久化最后一个原生 plan 的恢复点；应用层历史可以另外保存多篇记录。
 
+到达音轨末尾后再次播放，会先等待原生 seek 回到起点完成，再启动播放。回调核对用户仍要求播放、当前音轨与计划 generation 未变、未在重新准备且睡眠期限未到；中途暂停、停止或换内容时不自动重启。此路径直接启动播放器，不递归调用 play，避免极短音轨反复进入末尾判断。该顺序修复仍需模拟器或真机运行验证。
+
 ## 睡眠定时
 
 截止时间和渐弱在原生层：原生 run-loop timer、`AVPlayer` 周期观察及媒体时间边界观察共同检查绝对截止时间。UI 被卸载或 JavaScript 暂停不参与计时。到期暂停并停用会话，留白也属于媒体播放时间。更改速率、seek 会重设边界观察；若用户暂停直到超过截止时间，再次播放会直接到期停止。
@@ -36,7 +40,7 @@ Expo Go 不含此原生模块，不可用来验收 iOS。Android 原生引擎未
 
 ## 原生验证状态
 
-开发环境为 Linux，没有 Swift 编译器、Xcode、Apple 签名身份、连接的 iPad 或 iOS Simulator。Swift 源码经过审查，但**尚未进行原生编译、安装或音频真机测试**。必须完成以下验收后才可称为稳定后台版本：
+开发环境为 Linux，没有 Swift 编译器、Xcode、Apple 签名身份、连接的 iPad 或 iOS Simulator。2026-11-07 已通过 [GitHub macOS 原生 Release 构建](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976)（Xcode 26.6 / Swift 6.3.3），但**尚未完成实体 iPad 安装或音频真机测试**。必须完成以下验收后才可称为稳定后台版本：
 
 已在当前安装的 Expo SDK 58 依赖下执行 `expo-modules-autolinking resolve --platform apple --json`，确认发现本地 NoxiaAudio pod 和 NoxiaAudioModule。Web 预览的完成事件推进、留白时长、取消后的陈旧回调、step seek、sleep 截止、读音替换及引擎不可用行为有 Vitest 测试；这些测试不覆盖 AVFoundation。SDK 58 的 ExpoModulesCore 要求 iPadOS/iOS 16.4+ 与新的 Swift/Xcode 构建工具链，不应承诺旧 Mac 本机可构建。
 

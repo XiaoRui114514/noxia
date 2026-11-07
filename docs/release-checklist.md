@@ -17,8 +17,8 @@
 
 已从实际安装包核对：React Native 0.88.1 的 `scripts/cocoapods/helpers.rb` 声明 Xcode 最低 16.1；Expo SDK 58 的 `ExpoModulesCore.podspec` 要求 iOS 16.4、Swift 6.0。实际 CocoaPods 解析和 CI 编译结果才可证明当前依赖链兼容，不能仅凭最低版本声明认定旧 Mac 可构建。
 
-- [ ] GitHub macOS job 实际执行并产生成功结果。
-- [ ] 检查 NoxiaAudio Swift 编译日志及依赖目标；失败后修复再运行。
+- [x] GitHub macOS job 实际执行并产生成功结果：[首次构建](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976)。
+- [x] 检查 NoxiaAudio Swift 编译日志及依赖目标；首次编译成功，后续主线程修复继续复验。
 
 ## iPad 开发构建
 

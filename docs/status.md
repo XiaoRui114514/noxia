@@ -1,8 +1,8 @@
-# 开发记录 · 2026-11-06
+# 开发记录 · 更新于 2026-11-07
 
 ## 当前阶段
 
-2026-11-07 继续：用户已创建私人仓库 `XiaoRui114514/noxia`，保持私有并准备推送、运行现有 GitHub Actions；不会修改可见性或付费设置。
+2026-11-07 继续：用户已创建私人仓库 `XiaoRui114514/noxia`，代码已推送并保持私有，远程常规 CI 与首次原生构建通过；不会修改可见性或付费设置。
 
 0.1 开发版：实际代码、可运行 Web 版、原生系统语音模块、云端账号扩展与测试已完成第一轮集成。**尚未交付可安装的签名 iPad 应用，不满足整体验收。**
 
@@ -21,7 +21,7 @@
 
 ## 原生验证与发布门禁
 
-GitHub 的 `Build iPad simulator` 工作流将进行真实 macOS 无签名 Release 编译。**编译结果必须看 Actions 运行，本文不预先声称通过。** 无签名模拟器构建不能安装到真机。
+[首次原生工作流](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976) 已实际通过 macOS 无签名 Release 编译；Xcode 26.6、Swift 6.3.3，含 NoxiaAudio Swift 模块。 无签名模拟器构建不能安装到真机。
 
 iPad 安装及后台播放的最终门禁：Apple 团队／签名、EAS 项目、iPad 注册；在 iPad 真机检查锁屏1小时、静音留白期间后台、睡眠停止和渐弱、暂停恢复、耳机断开、来电／其他媒体中断、AirPlay／蓝牙、重启恢复、断网、内存及系统多任务。没有执行这些测试。
 
@@ -40,3 +40,10 @@ Cloudflare 门禁：备份可恢复、staging 兼容旧站点、用户审批具�
 本地 Git 已提交自主代码，使用 GitHub noreply 作者地址。当前 GitHub App 有 contents/actions/workflows write，但不具备创建仓库权限。GraphQL createRepository 与 REST POST /user/repos 均返回 Resource not accessible by integration（403）。上轮未创建仓库、未推送或执行 GitHub Actions。2026-11-07 用户已创建私有空仓库，该创建权限阻碍已解除；本轮继续推送。没有对其他仓库推送或改动。
 
 最终本地检查：`npm ci` 可重现、63项应用单测和15项后端单测通过，完整9项原有E2E通过，新增睡前默认定时另项检查；iOS Hermes JS 导出成功（不是Swift编译）。GitHub创建两种API均被权限拒绝，无远程Actions结果。
+
+## 2026-11-07 远程验证
+
+- 私有仓库已推送： https://github.com/XiaoRui114514/noxia ，main 初次远程 SHA `2a10fdf`。未改为 Public。
+- [常规 CI 42341081073](https://github.com/XiaoRui114514/noxia/actions/runs/42341081073)：app 与 backend 全通过，63 项应用单测、15 项后端单测、10 项 E2E、静态检查、凭据扫描、Web 导出和依赖兼容检查成功。
+- [原生构建 42341080976](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976)：Release iOS Simulator 构建成功。尚未签名，不能安装实体 iPad。后续增加临时 iPad 模拟器启动／截图验证，结果不预先标为成功。
+- 仅使用现有标准 GitHub runner，不启用 EAS 付费构建，不调整 GitHub 套餐／预算。当前连接无读取账单权限，实际私有仓库额度与使用量需账号持有人在 GitHub 查看。
