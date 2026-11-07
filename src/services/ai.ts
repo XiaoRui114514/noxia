@@ -1,32 +1,116 @@
 export type AISettings = { base: string; model: string; key: string };
+export type APIConnection = { base: string; key?: string; model?: string };
+export class AIRequestError extends Error {
+  constructor(
+    message: string,
+    public status?: number,
+  ) {
+    super(message);
+    this.name = "AIRequestError";
+  }
+}
 export function apiBase(value: string) {
-  const u = new URL(value);
+  let u: URL;
+  try {
+    u = new URL(value.trim());
+  } catch {
+    throw new Error("请填写有效的 HTTPS 接口地址");
+  }
   if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash)
     throw new Error("接口地址必须是无凭据、无查询参数的 HTTPS 地址");
-  return u.toString().replace(/\/$/, "");
+  return u.toString().replace(/\/+$/, "");
 }
-async function request(settings: AISettings, path: string, body?: unknown) {
-  const response = await fetch(`${apiBase(settings.base)}${path}`, {
-    method: body ? "POST" : "GET",
-    headers: {
-      Authorization: `Bearer ${settings.key}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(90000),
-  });
-  if (!response.ok)
-    throw new Error(
-      `接口返回 ${response.status}，请检查地址、权限、额度和模型。`,
+export function modelApiBase(value: string) {
+  const base = apiBase(value);
+  if (!new URL(base).pathname.endsWith("/v1"))
+    throw new Error("请填写以 /v1 结尾的兼容协议接口地址");
+  return base;
+}
+async function request(
+  settings: APIConnection,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+) {
+  const endpoint = modelApiBase(settings.base);
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(cancel, body ? 90000 : 20000);
+  try {
+    let response: Response;
+    try {
+      if (controller.signal.aborted) throw new Error("aborted");
+      const key = settings.key?.trim();
+      response = await fetch(`${endpoint}${path}`, {
+        method: body ? "POST" : "GET",
+        headers: {
+          ...(key ? { Authorization: `Bearer ${key}` } : {}),
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+        redirect: "error",
+      });
+    } catch {
+      if (controller.signal.aborted) {
+        const error = new Error("请求已取消或超时");
+        error.name = "AbortError";
+        throw error;
+      }
+      throw new AIRequestError("无法连接此接口，请检查地址、网络与服务设置。");
+    }
+    if (!response.ok) {
+      if (path === "/models" && [404, 405, 501].includes(response.status))
+        throw new AIRequestError(
+          "此服务未提供兼容的 GET /models，无法选择模型。",
+          response.status,
+        );
+      throw new AIRequestError(
+        `接口返回 ${response.status}，请检查地址、权限、额度和模型。`,
+        response.status,
+      );
+    }
+    try {
+      return await response.json();
+    } catch {
+      throw new AIRequestError("接口未返回有效的 JSON 数据。");
+    }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+export async function listModels(
+  settings: APIConnection,
+  options: { signal?: AbortSignal } = {},
+): Promise<string[]> {
+  const data = await request(settings, "/models", undefined, options.signal);
+  if (!data || !Array.isArray(data.data) || data.data.length > 10000)
+    throw new AIRequestError(
+      "接口未返回有效的模型目录（需要 data 数组及模型 id）。",
     );
-  return response.json();
-}
-export async function listModels(settings: AISettings): Promise<string[]> {
-  const data = await request(settings, "/models");
-  return (data.data ?? [])
-    .map((m: { id: string }) => m.id)
-    .filter((v: unknown) => typeof v === "string")
-    .slice(0, 100);
+  const models = [
+    ...new Set<string>(
+      data.data.flatMap((model: unknown) => {
+        if (
+          !model ||
+          typeof model !== "object" ||
+          !("id" in model) ||
+          typeof model.id !== "string"
+        )
+          return [];
+        const id = model.id.trim();
+        return id && id.length <= 300 && !/[\u0000-\u001f\u007f]/.test(id)
+          ? [id]
+          : [];
+      }),
+    ),
+  ].slice(0, 1000);
+  if (!models.length)
+    throw new AIRequestError("此接口的模型目录为空，暂时无法选择模型。");
+  return models;
 }
 export async function generateScript(
   settings: AISettings,
@@ -34,8 +118,8 @@ export async function generateScript(
   style: string,
   customPrompt: string,
 ) {
-  if (!settings.key.trim() || !settings.model.trim())
-    throw new Error("请先填写模型与 API Key");
+  if (!settings.model.trim())
+    throw new Error("请先从接口返回的模型列表中选择模型");
   if (!source.trim() || source.length > 30000)
     throw new Error("请提供 1—30000 字资料");
   const data = await request(settings, "/chat/completions", {
@@ -53,7 +137,7 @@ export async function generateScript(
       },
     ],
   });
-  const text = data.choices?.[0]?.message?.content;
+  const text = data?.choices?.[0]?.message?.content;
   if (typeof text !== "string" || !text.trim() || text.length > 100000)
     throw new Error("接口未返回有效讲稿");
   return {
@@ -62,7 +146,6 @@ export async function generateScript(
       { prompt_tokens?: number; completion_tokens?: number } | undefined,
   };
 }
-
 // Session-only memo. Nothing is stored in public configuration, sync or logs.
 const scriptCache = new Map<
   string,

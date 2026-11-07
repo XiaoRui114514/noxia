@@ -2146,10 +2146,18 @@
       "repository": "https://github.com/expo/expo.git"
     },
     {
+      "name": "expo-blur",
+      "version": "58.0.5",
+      "license": "MIT",
+      "direct": true,
+      "development": false,
+      "repository": "https://github.com/expo/expo.git"
+    },
+    {
       "name": "expo-constants",
       "version": "58.0.15",
       "license": "MIT",
-      "direct": false,
+      "direct": true,
       "development": false,
       "repository": "https://github.com/expo/expo.git"
     },
@@ -2214,6 +2222,14 @@
       "version": "58.0.11",
       "license": "MIT",
       "direct": false,
+      "development": false,
+      "repository": "https://github.com/expo/expo.git"
+    },
+    {
+      "name": "expo-glass-effect",
+      "version": "58.0.5",
+      "license": "MIT",
+      "direct": true,
       "development": false,
       "repository": "https://github.com/expo/expo.git"
     },

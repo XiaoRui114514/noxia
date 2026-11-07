@@ -16,6 +16,7 @@ private struct Step: Decodable {
   let id: String
   let segmentId: String
   let kind: String
+  let uri: String?
   let text: String?
   let durationMs: Double?
   let voiceId: String?
@@ -120,6 +121,7 @@ private final class AudioEngine {
   private var duration = 0.0
   private var generation = 0
   private var preparing = false
+  private var externalWrites = 0
   private var cachedCount = 0
   private var errorMessage: String?
   private var playbackRate: Float = 1
@@ -181,9 +183,84 @@ private final class AudioEngine {
     }
   }
 
+  /// Restrict file steps to actual regular audio files within this app's private
+  /// canonical cache directory. Resolving symlinks prevents an in-cache alias
+  /// from exposing arbitrary files, and the trailing slash prevents prefix matches.
+  private func validatedCachedAudioURL(_ raw: String) throws -> URL {
+    guard let candidate = URL(string: raw), candidate.isFileURL,
+          candidate.host == nil || candidate.host == "" else {
+      throw AudioFailure.message("仅允许本应用音频缓存内的本地文件。")
+    }
+    let directory = try cacheDirectory.standardizedFileURL.resolvingSymlinksInPath()
+    let canonical = candidate.standardizedFileURL.resolvingSymlinksInPath()
+    guard canonical.path.hasPrefix(directory.path + "/"),
+          ["mp3", "caf"].contains(canonical.pathExtension.lowercased()),
+          !canonical.lastPathComponent.contains(".partial."),
+          try canonical.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+      throw AudioFailure.message("音频文件不在本应用缓存内、格式不支持或已不存在。")
+    }
+    return canonical
+  }
+
+  private func externalAudioDestination(_ key: String) throws -> URL {
+    guard key.utf8.count == 64, key.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else {
+      throw AudioFailure.message("音频缓存键须为 64 位十六进制摘要。")
+    }
+    return try cacheDirectory.appendingPathComponent("external-\(key.lowercased()).mp3")
+  }
+
+  func getExternalAudio(_ key: String) throws -> [String: Any]? {
+    let destination = try externalAudioDestination(key)
+    guard FileManager.default.fileExists(atPath: destination.path) else { return nil }
+    let url = try validatedCachedAudioURL(destination.absoluteString)
+    let bytes = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard bytes > 0, bytes <= 10 * 1024 * 1024 else {
+      throw AudioFailure.message("已缓存的外部音频无效，请清理后重新生成。")
+    }
+    return ["uri": url.absoluteString]
+  }
+
+  @MainActor
+  func cacheExternalAudio(_ base64: String, key: String) async throws -> [String: Any] {
+    let destination = try externalAudioDestination(key)
+    let maximumBytes = 10 * 1024 * 1024
+    guard !base64.isEmpty, base64.utf8.count <= ((maximumBytes + 2) / 3) * 4 else {
+      throw AudioFailure.message("单段 MP3 音频不得超过 10 MiB。")
+    }
+    if let cached = try getExternalAudio(key) { return cached }
+    guard let data = Data(base64Encoded: base64), !data.isEmpty, data.count <= maximumBytes else {
+      throw AudioFailure.message("音频不是有效的 Base64 或超过 10 MiB。")
+    }
+    // Reject common non-audio error pages before asking the system media parser.
+    let hasID3 = data.count >= 3 && data.prefix(3).elementsEqual([0x49, 0x44, 0x33])
+    let hasFrame = data.count >= 2 && data[data.startIndex] == 0xff && (data[data.startIndex + 1] & 0xe0) == 0xe0
+    guard hasID3 || hasFrame else { throw AudioFailure.message("语音服务未返回 MP3 音频。") }
+    let temporary = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".partial.mp3")
+    externalWrites += 1
+    defer { externalWrites -= 1; try? FileManager.default.removeItem(at: temporary) }
+    try data.write(to: temporary, options: .atomic)
+    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: temporary.path)
+    let asset = AVURLAsset(url: temporary)
+    let tracks = try await asset.loadTracks(withMediaType: .audio)
+    let audioDuration = try await asset.load(.duration)
+    guard !tracks.isEmpty, audioDuration.seconds.isFinite, audioDuration.seconds > 0, audioDuration.seconds <= 8 * 3600 else {
+      throw AudioFailure.message("语音服务返回的音频无效或时长超限。")
+    }
+    // Another request for this identity may have finished while the parser awaited.
+    if let cached = try getExternalAudio(key) { return cached }
+    try FileManager.default.moveItem(at: temporary, to: destination)
+    return ["uri": destination.absoluteString]
+  }
+
   func listVoices() -> [[String: Any]] {
     AVSpeechSynthesisVoice.speechVoices().map { voice in
-      ["id": voice.identifier, "name": voice.name, "language": voice.language,
+      let gender: String
+      switch voice.gender {
+      case .male: gender = "male"
+      case .female: gender = "female"
+      default: gender = "unspecified"
+      }
+      return ["id": voice.identifier, "name": voice.name, "language": voice.language, "gender": gender,
        "quality": voice.quality == .enhanced ? "enhanced" : (voice.quality.rawValue > AVSpeechSynthesisVoiceQuality.enhanced.rawValue ? "premium" : "default")]
     }
   }
@@ -216,6 +293,7 @@ private final class AudioEngine {
     guard let track = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
       throw AudioFailure.message("无法创建音频轨道。")
     }
+    let volumeParameters = AVMutableAudioMixInputParameters(track: track)
     var cursor = CMTime.zero
     var nextRanges: [(start: Double, end: Double)] = []
     do {
@@ -275,6 +353,10 @@ private final class AudioEngine {
               throw error
             }
           }
+        } else if step.kind == "file" {
+          guard let uri = step.uri else { throw AudioFailure.message("音频步骤缺少本地缓存地址。") }
+          url = try validatedCachedAudioURL(uri)
+          cachedCount += 1
         } else { throw AudioFailure.message("未知的编排步骤。") }
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
@@ -285,6 +367,9 @@ private final class AudioEngine {
           throw AudioFailure.message("本地音频损坏，请重新准备。")
         }
         let start = cursor.seconds
+        // System speech volume is already baked into PCM; apply a mix gain only
+        // to external files. Their requested synthesis rate is also already baked in.
+        volumeParameters.setVolume(step.kind == "file" ? Float(step.volume) : 1, at: cursor)
         try track.insertTimeRange(CMTimeRange(start: .zero, duration: assetDuration), of: sourceTrack, at: cursor)
         cursor = CMTimeAdd(cursor, assetDuration)
         guard cursor.seconds <= 8 * 3600 else { throw AudioFailure.message("单次播放计划超过 8 小时，请拆分内容。") }
@@ -295,6 +380,9 @@ private final class AudioEngine {
       if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
       itemObservation = nil
       let item = AVPlayerItem(asset: composition)
+      let mix = AVMutableAudioMix()
+      mix.inputParameters = [volumeParameters]
+      item.audioMix = mix
       player.replaceCurrentItem(with: item)
       plan = nextPlan
       ranges = nextRanges
@@ -625,7 +713,7 @@ private final class AudioEngine {
   }
 
   func clearCache() throws {
-    guard !preparing, player.rate == 0 else { throw AudioFailure.message("请先停止播放与语音准备。") }
+    guard !preparing, externalWrites == 0, player.rate == 0 else { throw AudioFailure.message("请先停止播放并等待语音准备或缓存完成。") }
     wantsPlayback = false
     interrupted = false
     setSleepTimer(seconds: 0, fade: 0)
@@ -670,6 +758,18 @@ public final class NoxiaAudioModule: Module {
       Task { @MainActor in
         do { promise.resolve(try await self.audio().prepare(plan)) }
         catch { promise.reject("ERR_NOXIA_AUDIO", error.localizedDescription) }
+      }
+    }
+    AsyncFunction("cacheExternalAudio") { (base64: String, key: String, promise: Promise) in
+      Task { @MainActor in
+        do { promise.resolve(try await self.audio().cacheExternalAudio(base64, key: key)) }
+        catch { promise.reject("ERR_NOXIA_CACHE", error.localizedDescription) }
+      }
+    }
+    AsyncFunction("getExternalAudio") { (key: String, promise: Promise) in
+      self.onMain {
+        do { promise.resolve(try self.audio().getExternalAudio(key)) }
+        catch { promise.reject("ERR_NOXIA_CACHE", error.localizedDescription) }
       }
     }
     Function("play") { self.onMain { self.audio().play() } }

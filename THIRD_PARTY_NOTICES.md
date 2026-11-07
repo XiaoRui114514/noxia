@@ -30,3 +30,5 @@ Apple 系统音色由 iPadOS 授权和管理，Noxia 不打包音色或系统资
 - `argparse`（Python 2.0 许可，nodeca）：[源代码与许可](https://github.com/nodeca/argparse)。
 
 使用 `node scripts/license-inventory.mjs` 可从锁文件和已安装包重新生成清单，不执行安装或访问凭据。软件包的许可证文本随 `npm ci` 下载；制作二进制发布包时还须将实际打包依赖所要求的版权与许可证文本纳入 About/法律声明或随附文件。
+
+0.2 新增 Expo GlassEffect、Blur、Constants，许可见依赖清单。黑白图标由原有自主图形经图像工具改色生成，不含第三方品牌资产。外部 TTS 不分发模型、声音或其权重，输出按所选服务的许可处理。

@@ -159,6 +159,19 @@ describe('foreground browser speech preview', () => {
     audio.stop();
   });
 
+  it('does not fabricate browser playback or persistent cache for external file steps', async () => {
+    const audio = createWebAudio();
+    const key = 'a'.repeat(64);
+    const cached = await audio.cacheExternalAudio('SUQzBAAAAAAA', key);
+    expect(cached.uri).toMatch(/^data:audio\/mpeg;base64,/);
+    expect(await audio.getExternalAudio(key)).toBeNull();
+    const value = plan();
+    value.steps = [{ id: 'cloud', segmentId: 'one', kind: 'file', uri: cached.uri, text: '你好', rate: 1, volume: 1 }];
+    await expect(audio.prepare(value)).rejects.toThrow('不支持云语音音频播放');
+    expect(audio.getStatus().playing).toBe(false);
+    expect(spoken).toHaveLength(0);
+  });
+
   it('rejects an unavailable browser engine instead of simulating playback', async () => {
     vi.stubGlobal('window', {});
     const audio = createWebAudio();

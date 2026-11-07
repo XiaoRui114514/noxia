@@ -1,8 +1,10 @@
-export type Voice = { id: string; name: string; language: string; quality: string };
+export type Voice = { id: string; name: string; language: string; quality: string; gender?: 'male' | 'female' | 'unspecified' };
 export type AudioStep = {
   id: string;
   segmentId: string;
-  kind: 'speech' | 'silence';
+  kind: 'speech' | 'silence' | 'file';
+  /** File steps accept audio already synthesized at their requested rate. */
+  uri?: string;
   text?: string;
   durationMs?: number;
   voiceId?: string;
@@ -49,5 +51,7 @@ export interface AudioBackend {
   getStatus(): AudioStatus;
   getCacheInfo(): Promise<{ count: number; bytes: number }>;
   clearCache(): Promise<void>;
+  cacheExternalAudio(base64: string, key: string): Promise<{ uri: string }>;
+  getExternalAudio(key: string): Promise<{ uri: string } | null>;
   addListener(event: 'onStatus', listener: (status: AudioStatus) => void): Subscription;
 }

@@ -26,7 +26,6 @@ export type History = {
 export type Settings = {
   aiBase: string;
   aiModel: string;
-  syncBase: string;
   voiceId: string;
   translationVoiceId: string;
   dark: "system" | "light" | "dark";
@@ -40,9 +39,8 @@ export type Library = {
   resume?: { resourceId: string; templateId: string; position: number };
 };
 export const defaults: Settings = {
-  aiBase: "https://api.openai.com/v1",
-  aiModel: "gpt-4.1-mini",
-  syncBase: "",
+  aiBase: "",
+  aiModel: "",
   voiceId: "",
   translationVoiceId: "",
   dark: "system",

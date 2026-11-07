@@ -44,7 +44,7 @@ import {
   uid,
   type Library,
 } from "./src/services/storage";
-import { generateCachedScript, listModels } from "./src/services/ai";
+import { generateCachedScript } from "./src/services/ai";
 import { login, logout, syncRequest, SyncError } from "./src/services/sync";
 import {
   listRemoteResources,
@@ -52,6 +52,16 @@ import {
   type ResourceEntry,
 } from "./src/resources";
 import { palettes } from "./src/ui/theme";
+import { AdaptiveShell } from "./src/ui/AdaptiveShell";
+import { ModelSettings, useModelConnection } from "./src/ui/ModelSettings";
+import {
+  ACCOUNT_API,
+  isAccountConfigured,
+  ACCOUNT_UNAVAILABLE_MESSAGE,
+} from "./src/services/accountConfig";
+import { VoiceSettings } from "./src/ui/VoiceSettings";
+import { useVoiceConnection } from "./src/services/useVoiceConnection";
+import { prepareExternalAudio } from "./src/services/externalAudio";
 
 const SAMPLE: Resource = {
   id: "welcome",
@@ -99,16 +109,16 @@ const nav: {
   icon: React.ComponentProps<typeof Ionicons>["name"];
 }[] = [
   { id: "home", label: "现在听", icon: "sunny-outline" },
-  { id: "library", label: "学习资源", icon: "library-outline" },
+  { id: "library", label: "资源", icon: "library-outline" },
   { id: "playlists", label: "播放列表", icon: "list-outline" },
-  { id: "editor", label: "我的文稿", icon: "create-outline" },
-  { id: "ai", label: "知识讲稿", icon: "reader-outline" },
-  { id: "templates", label: "背诵编排", icon: "reorder-four-outline" },
+  { id: "editor", label: "文稿", icon: "create-outline" },
+  { id: "ai", label: "讲稿", icon: "reader-outline" },
+  { id: "templates", label: "编排", icon: "reorder-four-outline" },
   { id: "voices", label: "声音", icon: "mic-outline" },
-  { id: "audio", label: "离线音频", icon: "download-outline" },
-  { id: "history", label: "学习足迹", icon: "time-outline" },
-  { id: "sleep", label: "睡前听读", icon: "moon-outline" },
-  { id: "settings", label: "设置与账号", icon: "settings-outline" },
+  { id: "audio", label: "缓存", icon: "download-outline" },
+  { id: "history", label: "记录", icon: "time-outline" },
+  { id: "sleep", label: "睡前", icon: "moon-outline" },
+  { id: "settings", label: "设置", icon: "settings-outline" },
 ];
 const labels: Record<string, string> = {
   original: "原文",
@@ -130,7 +140,6 @@ export default function App() {
     [loaded, setLoaded] = useState(false),
     [storageOK, setStorageOK] = useState(false);
   const [page, setPage] = useState<Page>("home"),
-    [mobileNav, setMobileNav] = useState(false),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState("");
   const [activeId, setActiveId] = useState("welcome"),
@@ -198,8 +207,7 @@ export default function App() {
     db.settings.dark === "dark" ||
     (db.settings.dark === "system" && system === "dark");
   const c = palettes[dark ? "dark" : "light"];
-  const wide = width >= 1000,
-    sidebar = width >= 760;
+  const wide = width >= 1100;
   const resources = db.resources;
   const active =
     resources.find((r) => r.id === activeId) ?? resources[0] ?? SAMPLE;
@@ -212,6 +220,18 @@ export default function App() {
   function settings(p: Partial<Library["settings"]>) {
     update((v) => ({ ...v, settings: { ...v.settings, ...p } }));
   }
+  const modelConnection = useModelConnection({
+    base: db.settings.aiBase,
+    selectedModel: db.settings.aiModel,
+    apiKey: aiKey,
+    onBaseChange: (base) => settings({ aiBase: base }),
+    onModelChange: (model) => settings({ aiModel: model }),
+    onKeyChange: setAIKey,
+    enabled: loaded && (page === "settings" || page === "ai"),
+  });
+  const voiceConnection = useVoiceConnection();
+  const audioPreparation = useRef(0),
+    audioAbort = useRef<AbortController | null>(null);
   function message(error: unknown) {
     setNotice(error instanceof Error ? error.message : String(error));
   }
@@ -309,14 +329,24 @@ export default function App() {
         persistProgress();
       }
     });
-    getSecret("ai-key")
-      .then((k) => setAIKey(k ?? ""))
-      .catch(message);
     return () => {
       reduce.remove();
       sub.remove();
     };
   }, []);
+  useEffect(() => {
+    if (!loaded || !isAccountConfigured()) return;
+    let active = true;
+    void syncRequest(ACCOUNT_API, "/v1/auth/me")
+      .then((data) => {
+        if (active && typeof data.user?.username === "string")
+          setAccount(data.user.username);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [loaded]);
   useEffect(() => {
     if (loaded && storageOK) saveLibrary(db).catch(message);
   }, [db, loaded, storageOK]);
@@ -357,11 +387,10 @@ export default function App() {
       setLoop(false);
     }
     setPage(next);
-    setMobileNav(false);
     setNotice("");
   }
   function putResource(r: Resource) {
-    Audio.stop();
+    stopAudio();
     setPlan(null);
     update((v) => ({
       ...v,
@@ -434,6 +463,37 @@ export default function App() {
     setBody(text);
     go("editor");
   }
+  function stopAudio() {
+    audioPreparation.current++;
+    audioAbort.current?.abort();
+    audioAbort.current = null;
+    Audio.stop();
+  }
+  async function previewAudio(
+    plan: AudioPlan,
+    config = voiceConnection.settings,
+    consent = voiceConnection.consent,
+  ) {
+    stopAudio();
+    setPlan(null);
+    livePlanRef.current = null;
+    const epoch = audioPreparation.current,
+      controller = new AbortController();
+    audioAbort.current = controller;
+    const prepared = await prepareExternalAudio(
+      plan,
+      config,
+      consent,
+      controller.signal,
+    );
+    if (epoch !== audioPreparation.current || controller.signal.aborted)
+      throw new Error("已停止试听");
+    await Audio.prepare(prepared.plan);
+    if (epoch !== audioPreparation.current || controller.signal.aborted)
+      throw new Error("已停止试听");
+    Audio.play();
+    if (prepared.warnings.length) setNotice(prepared.warnings.join("；"));
+  }
   function pronunciationMap() {
     const values: Record<string, string> = {};
     for (const line of dictionary.split("\n").filter(Boolean)) {
@@ -447,12 +507,33 @@ export default function App() {
     resume = false,
     playbackRate = rate,
   ) {
-    Audio.stop();
+    stopAudio();
     started.current = false;
     setPlan(null);
     livePlanRef.current = null;
-    const next = { ...p, pronunciations: pronunciationMap() };
+    const epoch = ++audioPreparation.current;
+    audioAbort.current?.abort();
+    const controller = new AbortController();
+    audioAbort.current = controller;
+    const source = { ...p, pronunciations: pronunciationMap() };
+    if (
+      source.steps.some((s) => s.voiceId?.startsWith("remote:")) &&
+      (!voiceConnection.ready || !voiceConnection.keyReady)
+    )
+      throw new Error("声音设置正在读取，请稍后播放");
+    const prepared = await prepareExternalAudio(
+      source,
+      voiceConnection.settings,
+      voiceConnection.consent,
+      controller.signal,
+    );
+    if (epoch !== audioPreparation.current || controller.signal.aborted)
+      throw new Error("已停止准备");
+    const next = prepared.plan;
     const info = await Audio.prepare(next);
+    if (epoch !== audioPreparation.current || controller.signal.aborted) {
+      throw new Error("已停止准备");
+    }
     setPlan(next);
     livePlanRef.current = next;
     Audio.setRate(playbackRate);
@@ -463,7 +544,8 @@ export default function App() {
     if (sleep) Audio.setSleepTimer(sleep * 60, 10);
     Audio.play();
     setPage("player");
-    if (p.warnings.length) setNotice(p.warnings.join("；"));
+    const warnings = [...p.warnings, ...prepared.warnings];
+    if (warnings.length) setNotice([...new Set(warnings)].join("；"));
   }
   async function start(
     resource: Resource = active,
@@ -526,7 +608,11 @@ export default function App() {
       force ? "重新生成 · 将调用模型接口" : "准备讲稿 · 优先复用本次会话缓存",
       async () => {
         const result = await generateCachedScript(
-          { base: db.settings.aiBase, model: db.settings.aiModel, key: aiKey },
+          (() => {
+            if (!modelConnection.settings)
+              throw new Error("请先连接服务并选择模型");
+            return modelConnection.settings;
+          })(),
           aiSource,
           aiStyle,
           prompt,
@@ -574,6 +660,41 @@ export default function App() {
     while (at > 0 && group(at - 1) === target) at--;
     Audio.skipStep(at);
   }
+  const shortLabels: Record<string, string> = {
+    写一段文字: "新建",
+    新建文稿: "新建",
+    导入文稿: "导入",
+    导入文件: "导入",
+    留白自背: "自背",
+    继续听: "继续",
+    打开播放器: "播放器",
+    保存文稿: "保存",
+    保存模板: "保存",
+    新建模板: "新建",
+    删除自建模板: "删除",
+    重新编排并播放: "应用编排",
+    编辑文稿: "编辑",
+    只选重点: "重点",
+    清除选择: "清除",
+    准备当前篇与待播队列: "播放队列",
+    开始睡前听读: "开始",
+    刷新缓存统计: "刷新",
+    清理缓存: "清理",
+    指定停止时间: "停止时间",
+    核对后存为文稿: "保存文稿",
+    生成讲稿: "生成",
+    "重新生成（调用接口）": "重写",
+    配置模型: "设置",
+    校验并导入: "导入",
+    "导出为 JSON 文本": "导出",
+    删除列表: "删除",
+    创建列表: "创建",
+    加入待播队列: "加入队列",
+    继续复习: "继续",
+    古诗文练习: "语文",
+    英语语法练习: "英语",
+    源代码与构建文档: "源码",
+  };
   function button(
     label: string,
     onPress: () => void,
@@ -597,16 +718,20 @@ export default function App() {
         ]}
       >
         {icon && (
-          <Ionicons name={icon} size={18} color={primary ? c.bg : c.accent} />
+          <Ionicons
+            name={icon}
+            size={18}
+            color={primary ? c.onAccent : c.accent}
+          />
         )}
         <Text
           style={{
-            color: primary ? c.bg : c.accent,
+            color: primary ? c.onAccent : c.accent,
             fontSize: 15,
             fontWeight: "600",
           }}
         >
-          {label}
+          {shortLabels[label] ?? label}
         </Text>
       </Pressable>
     );
@@ -617,6 +742,7 @@ export default function App() {
     placeholder: string,
     multiline = false,
     secure = false,
+    editable = true,
   ) {
     return (
       <TextInput
@@ -626,6 +752,7 @@ export default function App() {
         placeholder={placeholder}
         placeholderTextColor={c.muted}
         multiline={multiline}
+        editable={editable}
         secureTextEntry={secure}
         autoCapitalize="none"
         style={[
@@ -639,9 +766,6 @@ export default function App() {
   function heading(text: string, sub?: string) {
     return (
       <View style={{ marginBottom: 26 }}>
-        <Text style={[styles.eyebrow, { color: c.accent }]}>
-          Noxia · {page === "player" ? "正在播放" : "留一点时间给自己"}
-        </Text>
         <Text
           accessibilityRole="header"
           style={[styles.heading, { color: c.text }]}
@@ -678,7 +802,7 @@ export default function App() {
           accessibilityLabel={`打开 ${r.title}`}
           onPress={() => {
             if (r.id !== activeId) {
-              Audio.stop();
+              stopAudio();
               setPlan(null);
               livePlanRef.current = null;
             }
@@ -771,7 +895,7 @@ export default function App() {
                 <Text style={{ color: c.accent, marginTop: 22, fontSize: 13 }}>
                   {active?.kind === "grammar"
                     ? "语言与思考"
-                    : "听一段 · 想一想 · 歇一会"}
+                    : `${active.segments.length} 个句段`}
                 </Text>
               </View>
             </View>
@@ -912,9 +1036,7 @@ export default function App() {
             </View>
           </View>
           <View style={{ flex: 1, minWidth: 0, marginTop: wide ? 0 : 36 }}>
-            <Text style={[styles.eyebrow, { color: c.accent }]}>
-              跟着听，也可以暂时留白
-            </Text>
+            <Text style={[styles.eyebrow, { color: c.accent }]}>阅读面板</Text>
             {section("原文与笔记")}
             {button(showTranscript ? "收起阅读面板" : "展开阅读面板", () =>
               setShowTranscript(!showTranscript),
@@ -934,6 +1056,7 @@ export default function App() {
                     }}
                     accessibilityRole="checkbox"
                     accessibilityState={{ checked: selected.includes(s.id) }}
+                    aria-checked={selected.includes(s.id)}
                     onPress={() =>
                       setSelected((v) =>
                         v.includes(s.id)
@@ -1056,9 +1179,7 @@ export default function App() {
                 )}
               </View>
             ))}
-            {small(
-              "完整列表先缓存为原生时间线，跨篇无需前台切换。改变待播列表后需重新准备；后台跨篇行为仍待真机验收。",
-            )}
+            {small("播放前会先生成音频；更改队列后需重新准备。")}
           </View>
         </View>
       </>
@@ -1089,7 +1210,7 @@ export default function App() {
   function templatePage() {
     return (
       <>
-        {heading("让复习有自己的节奏", "朗读、重复、停顿，都是独立的步骤。")}
+        {heading("编排", "按顺序组合朗读、重复和留白")}
         <View style={styles.chips}>
           {allTemplates.map((t) =>
             button(t.name, () =>
@@ -1278,7 +1399,7 @@ export default function App() {
       case "home":
         return (
           <>
-            {heading("今天，慢慢听。", "把值得记住的内容，留在耳边。")}
+            {heading("现在听", "继续播放，或选择一份文稿")}
             <View style={[styles.hero, { backgroundColor: c.soft }]}>
               <View style={{ flex: 1 }}>
                 <Text
@@ -1304,7 +1425,7 @@ export default function App() {
                 <Text
                   style={{ color: c.muted, marginVertical: 14, lineHeight: 23 }}
                 >
-                  从上次的地方继续，或者留一点安静的时间自背。
+                  继续上次播放，或更换背诵模板。
                 </Text>
                 <View style={styles.chips}>
                   {button(
@@ -1347,9 +1468,9 @@ export default function App() {
                 "leaf-outline",
               )}
             </View>
-            {section("你的书架")}
+            {section("文稿")}
             {resources.slice(0, 6).map(row)}
-            {section("明天，再主动回想一次")}
+            {section("复习入口")}
             {small(
               "听过不等于掌握。播放记录与默写、做题结果分开；可前往原学习项目练习。",
             )}
@@ -1374,17 +1495,14 @@ export default function App() {
       case "player":
         return (
           <>
-            {heading("此刻，专心听。")}
+            {heading("正在播放")}
             {player()}
           </>
         );
       case "library":
         return (
           <>
-            {heading(
-              "学习资源",
-              "本机保存，可自由组合。远程资源保留各自的许可。",
-            )}
+            {heading("资源", "本机保存，可自由组合。远程资源保留各自的许可。")}
             {input(query, setQuery, "搜索标题")}
             <View style={styles.chips}>
               {button("新建文稿", () => edit(), true)}
@@ -1479,7 +1597,7 @@ export default function App() {
         return (
           <>
             {heading(
-              "我的文稿",
+              "文稿",
               "一行一个朗读单元；原文与译文之间用 Tab 分隔，不猜测文言文句子对应。",
             )}
             {input(title, setTitle, "作品标题")}
@@ -1521,7 +1639,7 @@ export default function App() {
                 <Text style={{ color: c.text, flex: 1 }}>{r.title}</Text>
                 {button("编辑", () => edit(r))}
                 {button("删除", () => {
-                  Audio.stop();
+                  stopAudio();
                   setPlan(null);
                   update((v) => ({
                     ...v,
@@ -1541,96 +1659,81 @@ export default function App() {
         return templatePage();
       case "voices":
         return (
-          <>
-            {heading(
-              "选一个，愿意久听的声音",
-              "系统已安装音色免费使用。音质由设备和系统语言包决定。",
-            )}
-            {small(
-              Platform.OS === "web"
-                ? "浏览器试听仅验证前台交互；不能验证 iPad 锁屏、缓存和系统高质量音色。"
-                : "建议在系统「辅助功能 → 朗读内容／阅读与朗读 → 声音」下载所需高质量音色。下载位置随系统版本变化。",
-            )}
-            <View style={styles.chips}>
-              {button(
-                "重新读取声音",
-                () =>
-                  void task("读取音色", async () =>
-                    setVoices(await Audio.listVoices()),
-                  ),
-              )}
-              {button("使用系统默认", () =>
-                settings({ voiceId: "", translationVoiceId: "" }),
-              )}
-            </View>
-            {voices.map((v) => (
-              <View
-                key={v.id}
-                style={[styles.resourceRow, { borderBottomColor: c.line }]}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={{ color: c.text, fontSize: 18 }}>{v.name}</Text>
-                  {small(`${v.language} · ${v.quality}`)}
-                  {small(v.id)}
-                </View>
-                <View style={styles.chips}>
-                  {button(
-                    db.settings.voiceId === v.id ? "原文 ✓" : "设为原文",
-                    () => settings({ voiceId: v.id }),
-                  )}
-                  {button(
-                    db.settings.translationVoiceId === v.id
-                      ? "译文 ✓"
-                      : "设为译文",
-                    () => settings({ translationVoiceId: v.id }),
-                  )}
-                  {button(
-                    "试听",
-                    () =>
-                      void task("准备试听", async () => {
-                        Audio.stop();
-                        setPlan(null);
-                        await Audio.prepare({
-                          id: "preview",
-                          title: "声音试听",
-                          steps: [
-                            {
-                              id: "v",
-                              segmentId: "v",
-                              kind: "speech",
-                              text: v.language.startsWith("zh")
-                                ? "留一点时间，听见自己。"
-                                : "Take your time. Listen and remember.",
-                              voiceId: v.id,
-                              rate: 1,
-                              volume: 1,
-                            },
-                          ],
-                          loop: false,
-                        });
-                        Audio.play();
-                      }),
-                  )}
-                </View>
-              </View>
-            ))}
-            {section("自定义读音")}
-            {input(
-              dictionary,
-              setDictionary,
-              "每行 文字=读音替代文字，例如：重庆=虫庆",
-              true,
-            )}
-            {small(
-              "仅改变合成文本，不改变原文。当前词典仅在本次打开期间保留；同一文字的读音参数进入缓存键。开源模型和付费语音尚未接入，不会自动计费。",
-            )}
-          </>
+          <VoiceSettings
+            connection={voiceConnection}
+            voices={voices}
+            colors={c}
+            primaryVoice={db.settings.voiceId}
+            translationVoice={db.settings.translationVoiceId}
+            onSelectVoice={(id, target) =>
+              settings(
+                target === "original"
+                  ? { voiceId: id }
+                  : { translationVoiceId: id },
+              )
+            }
+            onRefresh={() =>
+              void task("读取声音", async () =>
+                setVoices(await Audio.listVoices()),
+              )
+            }
+            onPreviewSystem={(voice) =>
+              void task("准备试听", () =>
+                previewAudio({
+                  id: "preview",
+                  title: voice.name,
+                  steps: [
+                    {
+                      id: "preview",
+                      segmentId: "preview",
+                      kind: "speech",
+                      text: voice.language.startsWith("zh")
+                        ? "这是一段声音试听。"
+                        : "This is a short voice preview.",
+                      voiceId: voice.id,
+                      rate: 1,
+                      volume: 1,
+                    },
+                  ],
+                  loop: false,
+                }),
+              )
+            }
+            onPreviewExternal={(settings, consent) =>
+              void task("准备试听", async () => {
+                if (Platform.OS !== "ios")
+                  throw new Error("外部声音请在应用内试听");
+                await previewAudio(
+                  {
+                    id: "preview-external",
+                    title: "试听",
+                    steps: [
+                      {
+                        id: "v",
+                        segmentId: "v",
+                        kind: "speech",
+                        text: "这是一段声音试听。This is a short voice preview.",
+                        voiceId: `remote:${settings.voice}`,
+                        rate: 1,
+                        volume: 1,
+                      },
+                    ],
+                    loop: false,
+                  },
+                  settings,
+                  consent,
+                );
+              })
+            }
+            dictionary={dictionary}
+            onDictionaryChange={setDictionary}
+          />
         );
       case "audio":
         return (
           <>
             {heading(
-              "离线音频",
+              "缓存",
               "系统语音先生成本地 PCM 音频，同样的内容与参数复用缓存。",
             )}
             {small(
@@ -1650,7 +1753,7 @@ export default function App() {
                 "清理缓存",
                 () =>
                   void task("清理音频", async () => {
-                    Audio.stop();
+                    stopAudio();
                     setPlan(null);
                     await Audio.clearCache();
                     setCache(await Audio.getCacheInfo());
@@ -1668,7 +1771,7 @@ export default function App() {
       case "playlists":
         return (
           <>
-            {heading("听读清单", "跨学科组合；列表保存在本机。")}
+            {heading("播放列表", "选择内容与播放顺序")}
             {input(playlistName, setPlaylistName, "新播放列表名称")}
             {button(
               "创建列表",
@@ -1876,10 +1979,7 @@ export default function App() {
       case "ai":
         return (
           <>
-            {heading(
-              "把知识，讲得好听些",
-              "生成文本需你核对、编辑并保存后，再转成声音。",
-            )}
+            {heading("讲稿", "生成文本需你核对、编辑并保存后，再转成声音。")}
             {input(
               aiSource,
               setAISource,
@@ -1907,9 +2007,7 @@ export default function App() {
               {button("重新生成（调用接口）", () => void generate(true))}
               {button("配置模型", () => go("settings"))}
             </View>
-            {small(
-              "此操作会将上述资料发送到你设置的第三方接口，可能按其价格收费。Noxia 不代付，也不自动执行生成文本。",
-            )}
+            {small("资料会发送到所选服务，费用按服务商计算。")}
             {section("待核对的生成稿")}
             {input(
               aiOutput,
@@ -1949,7 +2047,7 @@ export default function App() {
       case "sleep":
         return (
           <>
-            {heading("今晚，到这里就好。", "先听一会儿，再安心休息。")}
+            {heading("睡前", "选择时长，结束前逐渐降低音量")}
             <View style={{ paddingVertical: 38 }}>
               <Ionicons name="moon-outline" size={64} color={c.accent} />
               <Text
@@ -2006,7 +2104,7 @@ export default function App() {
                 persistProgress();
               })}
               {button("停止", () => {
-                Audio.stop();
+                stopAudio();
                 setPlan(null);
               })}
             </View>
@@ -2024,16 +2122,167 @@ export default function App() {
               const sec = (d.getTime() - Date.now()) / 1000;
               Audio.setSleepTimer(sec, 10);
               setSleep(Math.ceil(sec / 60));
-              setNotice(
-                "已在原生播放器设置停止期限。系统挂起、暂停恢复与真机计时仍需验收。",
-              );
+              setNotice("已设置停止时间");
             })}
           </>
         );
       case "settings":
         return (
           <>
-            {heading("设置与账号", "密钥与学习资料由你掌控。")}{" "}
+            {heading("设置")}
+            {section("账号登录")}
+            {small(
+              isAccountConfigured()
+                ? "与语文、英语项目共用学习账号"
+                : ACCOUNT_UNAVAILABLE_MESSAGE,
+            )}
+            {input(
+              username,
+              setUsername,
+              "用户名",
+              false,
+              false,
+              isAccountConfigured(),
+            )}
+            {input(
+              password,
+              setPassword,
+              "密码",
+              false,
+              true,
+              isAccountConfigured(),
+            )}
+            <View style={styles.chips}>
+              {button(
+                account ? `已登录 ${account}` : "登录",
+                () =>
+                  void task("登录移动网关", async () => {
+                    if (Platform.OS === "web")
+                      throw new Error(
+                        "请在应用内登录，网页预览不会发送账号密码。",
+                      );
+                    if (!ACCOUNT_API)
+                      throw new Error(ACCOUNT_UNAVAILABLE_MESSAGE);
+                    await login(ACCOUNT_API, username, password);
+                    setAccount(username);
+                    setPassword("");
+                    setSyncConflict(null);
+                    setNotice("已登录");
+                  }),
+                true,
+                undefined,
+                !isAccountConfigured(),
+              )}
+              {account &&
+                button(
+                  "退出",
+                  () =>
+                    void task("退出登录", async () => {
+                      await logout(ACCOUNT_API);
+                      setAccount("");
+                      setSyncConflict(null);
+                    }),
+                )}
+            </View>
+            {account && (
+              <>
+                {section("同步")}
+                {small(
+                  "当前仅同步自建模板；不自动上传文稿、API Key、私人导入资料或音频。云端新版本会触发冲突，不直接覆盖。",
+                )}
+                <View style={styles.chips}>
+                  {button(
+                    "上传模板快照",
+                    () =>
+                      void task("上传模板", async () => {
+                        let uploaded = 0;
+                        for (const t of db.templates) {
+                          try {
+                            const remote = await syncRequest(
+                              ACCOUNT_API,
+                              `/v1/sync/templates/${encodeURIComponent(t.id)}`,
+                            );
+                            if (remote.version > 0) {
+                              setSyncConflict(remote);
+                              throw new Error(
+                                "云端已有同 ID 模板。请先查看并导入云端版本，未覆盖已有数据。",
+                              );
+                            }
+                          } catch (e) {
+                            if (!(e instanceof SyncError && e.status === 404))
+                              throw e;
+                          }
+                          await syncRequest(
+                            ACCOUNT_API,
+                            `/v1/sync/templates/${encodeURIComponent(t.id)}`,
+                            { baseVersion: 0, data: t, deleted: false },
+                            "PUT",
+                          );
+                          uploaded++;
+                        }
+                        setNotice(
+                          `已上传 ${uploaded} 个自建模板；已有云端版本不会覆盖。`,
+                        );
+                      }),
+                  )}
+                  {button(
+                    "读取云端模板",
+                    () =>
+                      void task("读取云端", async () => {
+                        const index = await syncRequest(
+                          ACCOUNT_API,
+                          "/v1/sync/templates",
+                        );
+                        const entries = await Promise.all(
+                          (index.items ?? [])
+                            .filter((x: { deleted: boolean }) => !x.deleted)
+                            .slice(0, 100)
+                            .map((x: { id: string }) =>
+                              syncRequest(
+                                ACCOUNT_API,
+                                `/v1/sync/templates/${encodeURIComponent(x.id)}`,
+                              ),
+                            ),
+                        );
+                        setSyncConflict(entries);
+                      }),
+                  )}
+                </View>
+                {syncConflict !== null && (
+                  <>
+                    {input(
+                      JSON.stringify(syncConflict, null, 2),
+                      () => {},
+                      "云端快照（只读预览）",
+                      true,
+                    )}
+                    {button("导入云端模板，保留本机模板", () => {
+                      try {
+                        const entries = Array.isArray(syncConflict)
+                          ? syncConflict
+                          : [syncConflict];
+                        const imported = entries.map((raw) => {
+                          const data = (raw as { data: unknown }).data;
+                          return {
+                            ...parseTemplate(JSON.stringify(data)),
+                            id: uid(),
+                          };
+                        });
+                        update((v) => ({
+                          ...v,
+                          templates: [...v.templates, ...imported],
+                        }));
+                        setSyncConflict(null);
+                        setNotice("已作为新模板导入，保留本机版本。");
+                      } catch (e) {
+                        message(e);
+                      }
+                    })}
+                  </>
+                )}
+              </>
+            )}
+            <ModelSettings connection={modelConnection} colors={c} />
             {section("外观")}
             <View style={styles.chips}>
               {(["system", "light", "dark"] as const).map((mode) =>
@@ -2044,203 +2293,9 @@ export default function App() {
                 ),
               )}
             </View>
-            {section("大语言模型接口")}
-            {small(
-              "用于生成讲稿，与人声合成接口分开。DeepSeek 不作为 TTS。自定义接口会接收你的资料和 API Key，请使用可信地址。",
-            )}
-            <View style={styles.chips}>
-              {button("OpenAI", () =>
-                settings({
-                  aiBase: "https://api.openai.com/v1",
-                  aiModel: "gpt-4.1-mini",
-                }),
-              )}
-              {button("DeepSeek", () =>
-                settings({
-                  aiBase: "https://api.deepseek.com/v1",
-                  aiModel: "deepseek-chat",
-                }),
-              )}
-            </View>
-            {input(
-              db.settings.aiBase,
-              (v) => settings({ aiBase: v }),
-              "HTTPS API Base URL（通常含 /v1）",
-            )}
-            {input(
-              db.settings.aiModel,
-              (v) => settings({ aiModel: v }),
-              "手动输入模型 ID",
-            )}
-            {input(aiKey, setAIKey, "个人 API Key", false, true)}
-            <View style={styles.chips}>
-              {button(
-                "保存 Key",
-                () =>
-                  void task("保存安全设置", async () => {
-                    await setSecret("ai-key", aiKey);
-                    setNotice(
-                      Platform.OS === "web"
-                        ? "仅保存在本次浏览器内存，关闭后消失。"
-                        : "已写入设备 Keychain，不参与云同步。",
-                    );
-                  }),
-                true,
-              )}
-              {button(
-                "获取模型列表",
-                () =>
-                  void task("读取模型", async () => {
-                    setNotice(
-                      (
-                        await listModels({
-                          base: db.settings.aiBase,
-                          model: db.settings.aiModel,
-                          key: aiKey,
-                        })
-                      ).join(" · "),
-                    );
-                  }),
-              )}
-            </View>
-            {section("统一学习账号")}
-            {small(
-              "接入现有学习项目账号的移动网关。尚未部署，需先审查私有身份扩展、备份数据库并批准生产变更。不会自动访问原私有 Worker。",
-            )}
-            {input(
-              db.settings.syncBase,
-              (v) => settings({ syncBase: v }),
-              "已部署移动网关 HTTPS 地址",
-            )}
-            {input(username, setUsername, "用户名")}
-            {input(password, setPassword, "密码", false, true)}
-            <View style={styles.chips}>
-              {button(
-                account ? `已登录 ${account}` : "登录",
-                () =>
-                  void task("登录移动网关", async () => {
-                    if (Platform.OS === "web")
-                      throw new Error(
-                        "统一账号登录仅支持原生应用；Web 预览不会发送密码。",
-                      );
-                    if (!db.settings.syncBase)
-                      throw new Error(
-                        "尚未配置网关。请按 docs/cloudflare.md 部署并完成兼容性验证。",
-                      );
-                    await login(db.settings.syncBase, username, password);
-                    setAccount(username);
-                    setPassword("");
-                    setNotice("移动会话已安全保存。");
-                  }),
-                true,
-              )}
-              {button(
-                "退出",
-                () =>
-                  void task("退出登录", async () => {
-                    await logout(db.settings.syncBase);
-                    setAccount("");
-                  }),
-              )}
-            </View>
-            {section("手动同步自建模板")}
-            {small(
-              "当前仅同步自建模板；不自动上传文稿、API Key、私人导入资料或音频。云端新版本会触发冲突，不直接覆盖。",
-            )}
-            <View style={styles.chips}>
-              {button(
-                "上传模板快照",
-                () =>
-                  void task("上传模板", async () => {
-                    let uploaded = 0;
-                    for (const t of db.templates) {
-                      try {
-                        const remote = await syncRequest(
-                          db.settings.syncBase,
-                          `/v1/sync/templates/${encodeURIComponent(t.id)}`,
-                        );
-                        if (remote.version > 0) {
-                          setSyncConflict(remote);
-                          throw new Error(
-                            "云端已有同 ID 模板。请先查看并导入云端版本，未覆盖已有数据。",
-                          );
-                        }
-                      } catch (e) {
-                        if (!(e instanceof SyncError && e.status === 404))
-                          throw e;
-                      }
-                      await syncRequest(
-                        db.settings.syncBase,
-                        `/v1/sync/templates/${encodeURIComponent(t.id)}`,
-                        { baseVersion: 0, data: t, deleted: false },
-                        "PUT",
-                      );
-                      uploaded++;
-                    }
-                    setNotice(
-                      `已上传 ${uploaded} 个自建模板；已有云端版本不会覆盖。`,
-                    );
-                  }),
-              )}
-              {button(
-                "读取云端模板",
-                () =>
-                  void task("读取云端", async () => {
-                    const index = await syncRequest(
-                      db.settings.syncBase,
-                      "/v1/sync/templates",
-                    );
-                    const entries = await Promise.all(
-                      (index.items ?? [])
-                        .filter((x: { deleted: boolean }) => !x.deleted)
-                        .slice(0, 100)
-                        .map((x: { id: string }) =>
-                          syncRequest(
-                            db.settings.syncBase,
-                            `/v1/sync/templates/${encodeURIComponent(x.id)}`,
-                          ),
-                        ),
-                    );
-                    setSyncConflict(entries);
-                  }),
-              )}
-            </View>
-            {syncConflict !== null && (
-              <>
-                {input(
-                  JSON.stringify(syncConflict, null, 2),
-                  () => {},
-                  "云端快照（只读预览）",
-                  true,
-                )}
-                {button("导入云端模板，保留本机模板", () => {
-                  try {
-                    const entries = Array.isArray(syncConflict)
-                      ? syncConflict
-                      : [syncConflict];
-                    const imported = entries.map((raw) => {
-                      const data = (raw as { data: unknown }).data;
-                      return {
-                        ...parseTemplate(JSON.stringify(data)),
-                        id: uid(),
-                      };
-                    });
-                    update((v) => ({
-                      ...v,
-                      templates: [...v.templates, ...imported],
-                    }));
-                    setSyncConflict(null);
-                    setNotice("已作为新模板导入，保留本机版本。");
-                  } catch (e) {
-                    message(e);
-                  }
-                })}
-              </>
-            )}
-            {section("关于 Noxia 0.1")}
-            {small(
-              "iPadOS 优先 · 开源学习听读应用\n浏览器版仅用于交互预览。原生后台、锁屏、耳机、音频中断、分屏多窗口均须 Apple 构建及真机验收。",
-            )}
+            {section("关于")}
+
+            {small("版本 0.2.0")}
             <View style={styles.chips}>
               {button(
                 "源代码与构建文档",
@@ -2254,215 +2309,114 @@ export default function App() {
         );
     }
   }
+  const miniPlayer =
+    page !== "player" ? (
+      <View
+        style={[
+          styles.mini,
+          { backgroundColor: "transparent", borderTopWidth: 0 },
+        ]}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="展开播放器"
+          onPress={() => go("player")}
+          style={{
+            flex: 1,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <View style={[styles.miniCover, { backgroundColor: c.cover }]}>
+            <Ionicons name="musical-note-outline" size={22} color={c.text} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text
+              numberOfLines={1}
+              style={{ color: c.text, fontSize: 15, fontWeight: "600" }}
+            >
+              {active.title}
+            </Text>
+            <Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>
+              {status.playing
+                ? "正在播放"
+                : status.position
+                  ? clock(status.position)
+                  : "未播放"}
+            </Text>
+          </View>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={status.playing ? "暂停" : "播放"}
+          onPress={toggle}
+          style={{ padding: 14 }}
+        >
+          <Ionicons
+            name={status.playing ? "pause" : "play"}
+            size={27}
+            color={c.text}
+          />
+        </Pressable>
+      </View>
+    ) : undefined;
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
       <StatusBar style={dark ? "light" : "dark"} />
-      <View style={{ flex: 1, flexDirection: "row" }}>
-        {(sidebar || mobileNav) && (
-          <View
-            style={[
-              styles.sidebar,
-              {
-                backgroundColor: c.sidebar,
-                borderRightColor: c.line,
-                width: sidebar ? 210 : 230,
-              },
-              !sidebar && {
-                position: "absolute",
-                left: 0,
-                top: 0,
-                bottom: 0,
-                zIndex: 10,
-              },
-            ]}
-          >
-            <View
-              style={{
-                paddingHorizontal: 22,
-                paddingTop: 32,
-                paddingBottom: 30,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: 29,
-                  fontWeight: "600",
-                  letterSpacing: -1,
-                  color: c.text,
-                }}
-              >
-                noxia<Text style={{ color: c.accent }}> .</Text>
-              </Text>
-              <Text
-                style={{
-                  color: c.muted,
-                  fontSize: 11,
-                  letterSpacing: 2,
-                  marginTop: 8,
-                }}
-              >
-                听 · 读 · 记
-              </Text>
-            </View>
-            <ScrollView>
-              {nav.map((n) => (
-                <Pressable
-                  key={n.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={n.label}
-                  accessibilityState={{ selected: page === n.id }}
-                  onPress={() => go(n.id)}
-                  style={[
-                    styles.navItem,
-                    { backgroundColor: page === n.id ? c.soft : "transparent" },
-                  ]}
-                >
-                  <Ionicons
-                    name={n.icon}
-                    size={21}
-                    color={page === n.id ? c.accent : c.muted}
-                  />
-                  <Text
-                    style={{
-                      fontSize: 15,
-                      color: page === n.id ? c.accent : c.text,
-                      fontWeight: page === n.id ? "600" : "400",
-                    }}
-                  >
-                    {n.label}
-                  </Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-            <Text
-              style={{
-                color: c.muted,
-                fontSize: 11,
-                padding: 24,
-                lineHeight: 18,
-              }}
-            >
-              一段声音，一点留白。\n为主动回忆留出空间。
-            </Text>
-          </View>
-        )}
-        <View style={{ flex: 1, minWidth: 0 }}>
-          {!sidebar && (
-            <View style={[styles.topbar, { borderBottomColor: c.line }]}>
-              {button(
-                mobileNav ? "收起导航" : "导航",
-                () => setMobileNav(!mobileNav),
-                false,
-                "menu-outline",
-              )}
-              <Text style={{ color: c.text, fontSize: 19, fontWeight: "600" }}>
-                noxia
-              </Text>
-              {button(
-                "播放器",
-                () => go("player"),
-                false,
-                "musical-note-outline",
-              )}
-            </View>
-          )}
-          <ScrollView
-            contentContainerStyle={{
-              padding: wide ? 40 : 24,
-              paddingBottom: 40,
-              maxWidth: 1400,
-              width: "100%",
-              alignSelf: "center",
-            }}
-            keyboardShouldPersistTaps="handled"
-          >
-            <Animated.View style={{ opacity: fade }}>
-              {notice !== "" && (
-                <Pressable
-                  accessibilityRole="alert"
-                  onPress={() => setNotice("")}
-                  style={[styles.notice, { backgroundColor: c.soft }]}
-                >
-                  <Text selectable style={{ color: c.accent, lineHeight: 23 }}>
-                    {notice}
-                  </Text>
-                </Pressable>
-              )}
-              {busy !== "" && (
-                <View style={[styles.inline, { marginBottom: 20 }]}>
-                  <ActivityIndicator color={c.accent} />
-                  {/本地音频|完整播放列表/.test(busy) &&
-                    button("停止准备", () => {
-                      Audio.stop();
-                      setPlan(null);
-                      livePlanRef.current = null;
-                    })}
-                  <Text style={{ color: c.muted, flex: 1 }}>{busy}</Text>
-                </View>
-              )}
-              {render()}
-            </Animated.View>
-          </ScrollView>
-          {page !== "player" && (
-            <View
-              style={[
-                styles.mini,
-                { backgroundColor: c.surface, borderTopColor: c.line },
-              ]}
-            >
+      <AdaptiveShell
+        navItems={nav}
+        currentPage={page}
+        onNavigate={go}
+        dark={dark}
+        colors={c}
+        playerAction={() => go("player")}
+        miniPlayer={miniPlayer}
+      >
+        <ScrollView
+          contentContainerStyle={{
+            padding: wide ? 32 : 20,
+            paddingBottom: 32,
+            maxWidth: 1400,
+            width: "100%",
+            alignSelf: "center",
+          }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Animated.View style={{ opacity: fade }}>
+            {notice !== "" && (
               <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="展开播放器"
-                onPress={() => go("player")}
-                style={{
-                  flex: 1,
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 13,
-                }}
+                accessibilityRole="alert"
+                onPress={() => setNotice("")}
+                style={[styles.notice, { backgroundColor: c.soft }]}
               >
-                <View style={[styles.miniCover, { backgroundColor: c.cover }]}>
-                  <Ionicons
-                    name="musical-note-outline"
-                    size={22}
-                    color={c.accent}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text
-                    numberOfLines={1}
-                    style={{ color: c.text, fontSize: 15, fontWeight: "600" }}
-                  >
-                    {active.title}
-                  </Text>
-                  <Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>
-                    {status.playing
-                      ? "正在播放"
-                      : status.position
-                        ? clock(status.position)
-                        : "准备好就开始"}
-                  </Text>
-                </View>
+                <Text selectable style={{ color: c.text, lineHeight: 23 }}>
+                  {notice}
+                </Text>
               </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={status.playing ? "暂停" : "播放"}
-                onPress={toggle}
-                style={{ padding: 14 }}
-              >
-                <Ionicons
-                  name={status.playing ? "pause" : "play"}
-                  size={27}
-                  color={c.text}
-                />
-              </Pressable>
-            </View>
-          )}
-        </View>
-      </View>
+            )}
+            {busy !== "" && (
+              <View style={[styles.inline, { marginBottom: 20 }]}>
+                <ActivityIndicator color={c.text} />
+                <Text style={{ color: c.muted, flex: 1 }}>{busy}</Text>
+                {/本地音频|完整播放列表/.test(busy) &&
+                  button("停止准备", () => {
+                    audioPreparation.current++;
+                    audioAbort.current?.abort();
+                    stopAudio();
+                    setPlan(null);
+                    livePlanRef.current = null;
+                  })}
+              </View>
+            )}
+            {render()}
+          </Animated.View>
+        </ScrollView>
+      </AdaptiveShell>
     </SafeAreaView>
   );
 }
+
 const styles = StyleSheet.create({
   sidebar: { borderRightWidth: StyleSheet.hairlineWidth },
   navItem: {

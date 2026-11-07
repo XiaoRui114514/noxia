@@ -1,4 +1,5 @@
 import type { AudioBackend, AudioPlan, AudioStatus, Subscription } from './types';
+import { externalAudioDataURI } from './externalAudio';
 
 /** Development preview: browser-owned foreground speech; durations are estimates. */
 export function createWebAudio(): AudioBackend {
@@ -120,9 +121,10 @@ export function createWebAudio(): AudioBackend {
           speech.addEventListener('voiceschanged', ready);
         });
       }
-      return speech?.getVoices().map(v => ({ id: v.voiceURI, name: v.name, language: v.lang, quality: v.localService ? 'system-local' : 'browser-network' })) ?? [];
+      return speech?.getVoices().map(v => ({ id: v.voiceURI, name: v.name, language: v.lang, quality: v.localService ? 'system-local' : 'browser-network', gender: 'unspecified' as const })) ?? [];
     },
     async prepare(nextPlan) {
+      if (nextPlan.steps.some(step => step.kind === 'file')) throw new Error('当前网页预览不支持云语音音频播放，请使用 iOS 原生开发构建；系统语音预览仍可使用。');
       cancel();
       if (!synth()) throw new Error('此预览环境不能朗读。请构建 iOS Development Build。');
       if (!nextPlan.steps.length) throw new Error('没有可播放的内容。');
@@ -193,6 +195,8 @@ export function createWebAudio(): AudioBackend {
     getStatus() { return snapshot(); },
     async getCacheInfo() { return { count: 0, bytes: 0 }; },
     async clearCache() {},
+    async cacheExternalAudio(base64, key) { return { uri: externalAudioDataURI(base64, key) }; },
+    async getExternalAudio() { return null; },
     addListener(_event, listener): Subscription {
       listeners.add(listener);
       return { remove: () => listeners.delete(listener) };

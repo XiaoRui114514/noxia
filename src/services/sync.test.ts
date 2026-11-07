@@ -153,6 +153,41 @@ describe("mobile session and origin binding", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["switch", "logout"])(
+    "discards a pending response after %s without modifying the current session",
+    async (change) => {
+      session();
+      let complete!: (response: Response) => void;
+      fetchMock.mockReturnValue(
+        new Promise<Response>((resolve) => {
+          complete = resolve;
+        }),
+      );
+      const pending = syncRequest(base, "/v1/sync/playlists/current");
+      const rejected = expect(pending).rejects.toThrow("本次同步结果已忽略");
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      if (change === "switch") {
+        secrets.set("sync-token", "synthetic-account-b-session");
+        secrets.set("sync-account", "fictional-account-b");
+      } else secrets.clear();
+      const current = new Map(secrets);
+      complete(success({ version: 1, data: { owner: account } }));
+      await rejected;
+      expect(secrets).toEqual(current);
+    },
+  );
+
+  it("retains the current session after an ordinary network failure", async () => {
+    session();
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    await expect(
+      syncRequest(base, "/v1/sync/playlists/current"),
+    ).rejects.toThrow("offline");
+    expect(secrets.get("sync-token")).toBe(token);
+    expect(secrets.get("sync-account")).toBe(account);
+    expect(secrets.get("sync-origin")).toBe(base);
+  });
+
   it("reports 409 conflicts while retaining local session and hiding server details", async () => {
     session();
     fetchMock.mockResolvedValue(
@@ -172,6 +207,20 @@ describe("mobile session and origin binding", () => {
     expect(secrets.get("sync-token")).toBe(token);
   });
 
+  it("distinguishes wrong login credentials from an expired existing session", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("private authentication detail", { status: 401 }),
+    );
+    await expect(
+      login(base, "example-user", "fictional-password"),
+    ).rejects.toThrow("用户名或密码不正确");
+    session();
+    await expect(syncRequest(base, "/v1/auth/me")).rejects.toThrow(
+      "登录已过期",
+    );
+    expect(secrets.get("sync-token")).toBe(token);
+  });
+
   it("revokes a session then clears all local session fields on logout", async () => {
     session();
     fetchMock.mockResolvedValue(success({ ok: true }));
@@ -181,6 +230,32 @@ describe("mobile session and origin binding", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(secrets.size).toBe(0);
+  });
+
+  it("does not clear a replacement session when an earlier logout finishes", async () => {
+    session();
+    let complete!: (response: Response) => void;
+    fetchMock.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const pendingLogout = logout(base);
+    const rejected =
+      expect(pendingLogout).rejects.toThrow("本次同步结果已忽略");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    // Even on the same origin, a different token/account belongs to B.
+    fetchMock.mockResolvedValueOnce(
+      success({
+        accessToken: "synthetic-account-b-session",
+        user: { id: "fictional-account-b" },
+      }),
+    );
+    await login(base, "account-b", "fictional-password-b");
+    const replacement = new Map(secrets);
+    complete(success({ ok: true }));
+    await rejected;
+    expect(secrets).toEqual(replacement);
   });
 
   it("clears local secrets even when logout is offline or the address was changed", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiBase, generateScript, listModels } from "./ai";
+import { apiBase, modelApiBase, generateScript, listModels } from "./ai";
 
 const settings = {
   base: "https://language.example/v1/",
@@ -116,19 +116,108 @@ describe("AI provider boundary", () => {
     ).rejects.toThrow("有效讲稿");
   });
 
-  it("checks empty source, credentials, and length before making a request", async () => {
+  it("checks empty source, selected model, and length before making a request", async () => {
     for (const source of ["", " \n ", "甲".repeat(30001)]) {
       await expect(
         generateScript(settings, source, "简单讲解", ""),
       ).rejects.toThrow("30000");
     }
     await expect(
-      generateScript({ ...settings, key: "" }, "资料", "简单讲解", ""),
-    ).rejects.toThrow("API Key");
-    await expect(
       generateScript({ ...settings, model: " " }, "资料", "简单讲解", ""),
     ).rejects.toThrow("模型");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires a v1 endpoint for model operations without changing general sync URL validation", async () => {
+    expect(apiBase("https://sync.example")).toBe("https://sync.example");
+    expect(modelApiBase("https://gateway.example/prefix/v1/")).toBe(
+      "https://gateway.example/prefix/v1",
+    );
+    await expect(
+      listModels({ base: "https://gateway.example/v2" }),
+    ).rejects.toThrow("/v1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses optional authentication, GET, and cancellation for catalog requests", async () => {
+    fetchMock.mockResolvedValue(success({ data: [{ id: "available" }] }));
+    const controller = new AbortController();
+    await expect(
+      listModels({ base: settings.base }, { signal: controller.signal }),
+    ).resolves.toEqual(["available"]);
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options.method).toBe("GET");
+    expect(options.body).toBeUndefined();
+    expect(options.headers).not.toHaveProperty("Authorization");
+    expect(options.redirect).toBe("error");
+    fetchMock.mockClear();
+    controller.abort();
+    await expect(
+      listModels(settings, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("strictly extracts unique valid model IDs, rejecting empty and unsupported catalogs", async () => {
+    fetchMock.mockResolvedValueOnce(
+      success({
+        data: [
+          { id: "a" },
+          { id: "a" },
+          { id: " b " },
+          { id: "" },
+          { id: 1 },
+          null,
+          {},
+          "bad",
+          { id: "control\u0001" },
+        ],
+      }),
+    );
+    await expect(listModels(settings)).resolves.toEqual(["a", "b"]);
+    for (const payload of [
+      { data: [] },
+      { data: [{ id: 1 }] },
+      { models: ["a"] },
+      { data: {} },
+      null,
+    ]) {
+      fetchMock.mockResolvedValueOnce(success(payload));
+      await expect(listModels(settings)).rejects.toThrow();
+    }
+    fetchMock.mockResolvedValueOnce(
+      new Response("private unsupported body", { status: 404 }),
+    );
+    await expect(listModels(settings)).rejects.toThrow(
+      "未提供兼容的 GET /models",
+    );
+  });
+
+  it("supports chat generation on a provider that requires no API key", async () => {
+    fetchMock.mockResolvedValueOnce(
+      success({ choices: [{ message: { content: "资料讲稿" } }] }),
+    );
+    await expect(
+      generateScript({ ...settings, key: "" }, "资料", "简单讲解", ""),
+    ).resolves.toMatchObject({ text: "资料讲稿" });
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty(
+      "Authorization",
+    );
+  });
+
+  it("does not expose upstream network exception messages or malformed JSON bodies", async () => {
+    fetchMock.mockRejectedValueOnce(
+      new Error(`upstream leaked ${settings.key}`),
+    );
+    const networkError = await listModels(settings).catch((error) => error);
+    expect(networkError.message).not.toContain(settings.key);
+    expect(networkError.message).toContain("无法连接");
+    fetchMock.mockResolvedValueOnce(
+      new Response(`not JSON: ${settings.key}`, { status: 200 }),
+    );
+    const parseError = await listModels(settings).catch((error) => error);
+    expect(parseError.message).not.toContain(settings.key);
+    expect(parseError.message).toContain("JSON");
   });
 
   it("accepts exactly 30000 source characters and bounds custom prompt text", async () => {
