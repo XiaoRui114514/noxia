@@ -47,3 +47,18 @@ Cloudflare 门禁：备份可恢复、staging 兼容旧站点、用户审批具�
 - [常规 CI 42341081073](https://github.com/XiaoRui114514/noxia/actions/runs/42341081073)：app 与 backend 全通过，63 项应用单测、15 项后端单测、10 项 E2E、静态检查、凭据扫描、Web 导出和依赖兼容检查成功。
 - [原生构建 42341080976](https://github.com/XiaoRui114514/noxia/actions/runs/42341080976)：Release iOS Simulator 构建成功。尚未签名，不能安装实体 iPad。后续增加临时 iPad 模拟器启动／截图验证，结果不预先标为成功。
 - 仅使用现有标准 GitHub runner，不启用 EAS 付费构建，不调整 GitHub 套餐／预算。当前连接无读取账单权限，实际私有仓库额度与使用量需账号持有人在 GitHub 查看。
+
+## 真机 IPA 交付路径
+
+用户说明拥有普通 Apple ID，且已有签名方式，当前只需 IPA。因此新增 `Build iPad IPA for personal signing`：iphoneos SDK / ARM64 / Release / 不使用签名凭据；校验 iPad 支持、Mach-O 平台、Payload 与内置 main.jsbundle，并输出 SHA-256。模拟器 UI 工作流转为手动，当前扩展模拟器运行已主动取消以优先完成真机包；不将未执行的启动或语音场景记为通过。真机包构建结果待实际 Actions，不预先标通过。
+
+## 2026-11-07 IPA 实际交付结果
+
+- [设备构建 42342289923](https://github.com/XiaoRui114514/noxia/actions/runs/42342289923) 全通过；来源提交 `ab6f56c`，iphoneos SDK、ARM64、Release archive，未使用 Apple ID、签名身份或私有服务密钥。
+- `Noxia-unsigned.ipa`：8,438,488 bytes；版本0.1.0（build1）、bundle ID `com.noxia.app`、最低 iPadOS16.4。
+- SHA-256：`7270aecec97c1ae2d7d98513d32ccecc2adc3368f739216cc569613f80909a7e`。
+- 构建脚本与交付工作区独立复核 ZIP CRC、Payload、Info.plist、iPad设备族、ARM64 Mach-O及物理iOS LC_BUILD_VERSION平台2、audio后台声明、内置NoxiaAudioModule及main.jsbundle。不是模拟器包。
+- Actions产物 `Noxia-iPad-IPA-to-sign` 已生成；提取IPA与校验码到交付工作区。仓库保持 PRIVATE，没有生产部署或账号迁移。
+- 用户已有签名方式；只需由用户自行签名安装。本次没有实体设备连接，因此不把“真机目标构建成功”当作“已安装或锁屏播放通过”。
+- `42342053155` 扩展模拟器流程按用户“只需IPA”的指示主动取消；取消前Ruby语法检查与UITest目标生成已通过，启动和系统语音UITest未执行。不能将该取消记为音频测试成功或应用构建失败。
+- 常规CI `42342289911` 已通过（63应用单测、15后端单测、10浏览器E2E）。

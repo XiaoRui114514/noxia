@@ -58,9 +58,19 @@ npm run security:scan
 
 E2E 使用 Playwright。有系统 Chromium 会自动使用；否则先 `npx playwright install chromium`。测试内语音桩只验证前台控制流程，不验证音质。启用提交前检查：`git config core.hooksPath .githooks`。
 
+## 获取自行签名的真机 IPA
+
+2026-11-07 已实际完成 [真机 Release 构建](https://github.com/XiaoRui114514/noxia/actions/runs/42342289923)。[下载该次 IPA 产物](https://github.com/XiaoRui114514/noxia/actions/runs/42342289923/artifacts/13561807817)（私有仓库需登录，保留7天）：版本0.1.0、ARM64、最低 iPadOS 16.4，待使用你自己的签名。
+
+如果你已有签名方式，使用仓库 Actions 中的 **Build iPad IPA for personal signing**。它用 `iphoneos` SDK 对实体设备 ARM64 执行 Release archive，再打包 `Payload/Noxia.app` 为 `Noxia-unsigned.ipa`；不需要向仓库上传 Apple ID、证书、描述文件或任何签名服务凭据。
+
+在成功运行的 Artifacts 中下载 **Noxia-iPad-IPA-to-sign**，解压得到 IPA、SHA-256 校验文件与 `BUILD-INFO.json`。用你现有的签名方式签名后再安装到 iPad。构建本身不意味着签名或真机安装已完成。Artifacts 默认保留 7 天；过期后可手动 Run workflow 重新构建。
+
+不要使用 `Noxia-iOS-Simulator.zip` 给实体 iPad 签名，它的 SDK 平台不同。模拟器启动和 XCTest 流程改为手动运行，减少不需要的 macOS 构建；常规检查保持自动执行。
+
 ## 在 iPad 上安装
 
-本次环境没有 Expo 登录、Apple 签名、iPad 设备或 Cloudflare 凭据。以下是安装流程，**不是已完成的安装交付**。
+用户目前使用普通 Apple ID，并有自己的签名方式；本次按上节优先交付待自行签名的实体 iPad IPA。环境没有 Apple 签名凭据或连接的 iPad，**没有代为签名或完成真机安装**。下面 EAS / TestFlight 是可选分发路径，并非此 IPA 交付的前置要求。
 
 ### Windows → EAS 云构建 → 直接安装
 
