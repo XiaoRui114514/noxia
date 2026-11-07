@@ -1,0 +1,90 @@
+name: Build iPad IPA for personal signing
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-ipa.yml'
+      - 'scripts/package-ipa.sh'
+      - 'App.tsx'
+      - 'app.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.ts'
+      - 'assets/**'
+      - 'src/**'
+      - 'modules/**'
+permissions:
+  contents: read
+concurrency:
+  group: ios-device-ipa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Inspect device SDK
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          xcrun --sdk iphoneos --show-sdk-version
+      - run: npm ci
+      - name: Generate iOS project
+        run: npx expo prebuild --platform ios --no-install
+      - name: Install CocoaPods
+        working-directory: ios
+        run: |
+          set -o pipefail
+          pod install 2>&1 | tee ../pod-install.log
+      - name: Archive physical iPad ARM64 application without signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/Noxia.xcworkspace \
+            -scheme Noxia \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-device \
+            -archivePath build/Noxia.xcarchive \
+            -resultBundlePath build/Noxia-Device.xcresult \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            archive 2>&1 | tee xcodebuild-device.log
+      - name: Validate and package IPA
+        id: package
+        run: bash scripts/package-ipa.sh
+      - name: Upload IPA for owner signing
+        if: ${{ always() && steps.package.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Noxia-iPad-IPA-to-sign
+          path: build/ipa-artifacts/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-device-build-diagnostics
+          path: |
+            pod-install.log
+            xcodebuild-device.log
+            build/Noxia-Device.xcresult
+          retention-days: 7
+          if-no-files-found: ignore
+# This produces a real-device IPA with no owner signing credentials. It is not a
+# TestFlight upload or a signed installer: the owner must sign it before installation.
