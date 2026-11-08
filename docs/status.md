@@ -6,6 +6,6 @@
 
 本地验证：类型检查、169 项应用单测、16 项后端测试、安全扫描、Expo 依赖兼容检查、Web 导出和 Wrangler dry-run。浏览器回归覆盖 390、507、744、1194 像素、深浅色、大字体、键盘和刷新恢复；具体结果见本轮记录。
 
-0.4.0 build 4 已通过 [iPhoneOS ARM64 Release 构建](https://github.com/XiaoRui114514/noxia/actions/runs/42499501352)，未签名包需自行签名安装。模拟器和实体设备验收仍未完成。移动账号门禁保持关闭，无生产账号或数据库变更。
+0.4.0 build 4 已通过 [iPhoneOS ARM64 Release 构建](https://github.com/XiaoRui114514/noxia/actions/runs/42499501352)，[IPA 已发布](https://github.com/XiaoRui114514/noxia/releases/download/v0.4.0-build4/Noxia-0.4.0.ipa)并下载复核，未签名包需自行签名安装。模拟器和实体设备验收仍未完成。移动账号门禁保持关闭，无生产账号或数据库变更。
 
 待继续：专辑云同步与拖动排序、账号资料/缓存隔离、离线待传、增量同步、删除传播、音频配额及逐篇清理、导入格式和平台扩展。这些不计为本轮完成。

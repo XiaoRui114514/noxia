@@ -46,6 +46,8 @@
 
 ## 安装包
 
+当前版本：[下载 Noxia 0.4.0 IPA](https://github.com/XiaoRui114514/noxia/releases/download/v0.4.0-build4/Noxia-0.4.0.ipa) · [SHA256](https://github.com/XiaoRui114514/noxia/releases/download/v0.4.0-build4/Noxia-0.4.0.ipa.sha256)。ARM64 iPhoneOS、build 4，最低 iOS / iPadOS 16.4；未签名，需用自己的签名方式安装。包已实际下载复核，与 [构建记录](https://github.com/XiaoRui114514/noxia/actions/runs/42499501352) 一致；尚未完成实体设备验收。
+
 使用 Actions 中的 **Build iPad IPA for personal signing**，在成功运行的 Artifacts 下载 **Noxia-iPad-IPA-to-sign**。解压得到：
 
 - `Noxia-unsigned.ipa`：实体设备 ARM64 Release 包。
