@@ -1,4 +1,4 @@
-name: Deliver Noxia 0.3 IPA
+name: Deliver Noxia 0.4 IPA
 on:
   push:
     branches: [build/ipa-0.3.0]
@@ -17,19 +17,27 @@ jobs:
     steps:
       - name: Download and verify the completed device build
         run: |
-          gh run download 42384144475 --name Noxia-iPad-IPA-to-sign --dir delivery
-          echo 'a127a2212ba86dbe5a6820bc60f68ea98c2f2ffe4ef0e7529d6ec1ed2f754840  delivery/Noxia-unsigned.ipa' | sha256sum --check
+          gh run view 42499501352 --json headSha,conclusion > build-run.json
+          python3 - <<'PY'
+          import json
+          run=json.load(open('build-run.json'))
+          assert run['headSha']=='d6f0f230f89ad98cb25659ac416a7deb08316e25' and run['conclusion']=='success'
+          PY
+          gh run download 42499501352 --name Noxia-iPad-IPA-to-sign --dir delivery
+          echo '71a806961312d1d90d9c8cc1e88b3c8ff7c92c5552e6acb5505f4eba53ffa786  delivery/Noxia-unsigned.ipa' | sha256sum --check
           python3 - <<'PY'
           import zipfile,plistlib
           with zipfile.ZipFile('delivery/Noxia-unsigned.ipa') as z:
               assert z.testzip() is None
               p=plistlib.loads(z.read('Payload/Noxia.app/Info.plist'))
-              assert p['CFBundleShortVersionString']=='0.3.0' and p['CFBundleVersion']=='3'
+              assert p['CFBundleShortVersionString']=='0.4.0' and p['CFBundleVersion']=='4'
               assert p['CFBundleSupportedPlatforms']==['iPhoneOS'] and 2 in p['UIDeviceFamily']
+              assert p['CFBundleIdentifier']=='com.noxia.app'
+              assert 'Payload/Noxia.app/main.jsbundle' in z.namelist()
           PY
-          mv delivery/Noxia-unsigned.ipa delivery/Noxia-0.3.0.ipa
+          mv delivery/Noxia-unsigned.ipa delivery/Noxia-0.4.0.ipa
           cd delivery
-          sha256sum Noxia-0.3.0.ipa > Noxia-0.3.0.ipa.sha256
+          sha256sum Noxia-0.4.0.ipa > Noxia-0.4.0.ipa.sha256
       - name: Publish standalone IPA for owner signing
         run: |
-          gh release create v0.3.0-build3 delivery/Noxia-0.3.0.ipa delivery/Noxia-0.3.0.ipa.sha256 delivery/BUILD-INFO.json --target 83e36509ba08711b3050b70809ef0401e3bdef91 --prerelease --title 'Noxia 0.3.0 · IPA' --notes 'ARM64 iPhoneOS Release, build 3, iPadOS 16.4+. Unsigned: sign with your own signing method before installation. Built from 83e3650; original build run 42384144475. No production account/database changes.'
+          gh release create v0.4.0-build4 delivery/Noxia-0.4.0.ipa delivery/Noxia-0.4.0.ipa.sha256 delivery/BUILD-INFO.json --target d6f0f230f89ad98cb25659ac416a7deb08316e25 --prerelease --title 'Noxia 0.4.0 · IPA' --notes 'Configurable albums, ordered playlist fixes and a first-use resource license dialog. ARM64 iPhoneOS Release, build 4, iPadOS 16.4+. Unsigned: sign with your own signing method before installation. Built from d6f0f23; original build run 42499501352. No production account/database changes.'
