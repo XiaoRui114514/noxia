@@ -1,3 +1,9 @@
+import { AlbumPage } from "./src/ui/AlbumPage";
+import { PlaylistPage } from "./src/ui/PlaylistPage";
+import { ResourceConsent } from "./src/ui/ResourceConsent";
+import { albumDefaults, albumSummary, compileAlbum, validateAlbum, type Album } from "./src/core/albums";
+import { validatePlaylist, removeResource, type Playlist } from "./src/core/collections";
+import type { PlaybackCollection } from "./src/services/storage";
 import { version } from "./package.json";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -63,6 +69,7 @@ import {
   readAllTemplates,
 } from "./src/services/sync";
 import {
+  RESOURCE_LICENSE_VERSION,
   listRemoteResources,
   loadRemoteResource,
   type ResourceEntry,
@@ -118,6 +125,7 @@ type Page =
   | "history"
   | "ai"
   | "settings"
+  | "albums"
   | "playlists"
   | "sleep";
 const nav: {
@@ -129,6 +137,7 @@ const nav: {
   { id: "review", label: "复习", icon: "checkmark-circle-outline" },
   { id: "library", label: "资源", icon: "library-outline" },
   { id: "playlists", label: "播放列表", icon: "list-outline" },
+  { id: "albums", label: "专辑", icon: "albums-outline" },
   { id: "editor", label: "文稿", icon: "create-outline" },
   { id: "ai", label: "讲稿", icon: "reader-outline" },
   { id: "templates", label: "编排", icon: "reorder-four-outline" },
@@ -178,7 +187,7 @@ export default function App() {
   const [templateDraft, setTemplateDraft] = useState<Template | null>(null),
     [templateJSON, setTemplateJSON] = useState("");
   const [remote, setRemote] = useState<ResourceEntry[]>([]),
-    [consent, setConsent] = useState(false),
+    [licenseKind, setLicenseKind] = useState<"poetry"|"grammar"|null>(null),
     [query, setQuery] = useState("");
   const [aiKey, setAIKey] = useState(""),
     [aiStyle, setAIStyle] = useState("简单讲解"),
@@ -186,16 +195,14 @@ export default function App() {
     [aiSource, setAISource] = useState(""),
     [aiOutput, setAIOutput] = useState(""),
     [usage, setUsage] = useState("");
-  const [account, setAccount] = useState(""),
-    [playlistName, setPlaylistName] = useState(""),
-    [playlistId, setPlaylistId] = useState("");
+  const [account, setAccount] = useState(""),[albumId,setAlbumId]=useState("");
   const [queue, setQueue] = useState<string[]>([]),
     [deadline, setDeadline] = useState(""),
     [dictionary, setDictionary] = useState("");
   const [stopAt, setStopAt] = useState<number | null>(null);
   const sourcePlan = useRef<AudioPlan | null>(null),
     contextRef = useRef("");
-  const sessionMeta = useRef<{ selectedIds?: string[]; rate: number; templateId?:string }>({
+  const sessionMeta = useRef<{ selectedIds?: string[]; rate: number; templateId?:string;collection?:PlaybackCollection }>({
     rate: 1,
   });
   sessionMeta.current.rate=rate;
@@ -228,8 +235,7 @@ export default function App() {
   const storageReady = useRef(storageOK);
   storageReady.current = storageOK;
   const [repeatCount, setRepeatCount] = useState(1),
-    [shuffle, setShuffle] = useState(false),
-    [itemEditId, setItemEditId] = useState("");
+    [shuffle, setShuffle] = useState(false);
   const toggleAction = useRef<() => void>(() => {});
   toggleAction.current = toggle;
   const livePlanRef = useRef(plan);
@@ -273,6 +279,8 @@ export default function App() {
     enabled: loaded && (page === "settings" || page === "ai"),
   });
   const voiceConnection = useVoiceConnection();
+  const collectionVoices=[...voices.map(v=>({id:v.id,name:v.name,detail:`${v.language} · 系统声音`})),...(voiceConnection.ready&&voiceConnection.keyReady&&voiceConnection.consent?.confirmed&&voiceConnection.settings.provider==='openai-compatible'?[...new Map([...voiceConnection.externalVoices.map(v=>({id:`remote:${v.id}`,name:v.name,detail:`${v.language} · 外部服务`})),...(voiceConnection.settings.voice?[{id:`remote:${voiceConnection.settings.voice}`,name:voiceConnection.settings.voice,detail:'已配置的外部声音'}]:[])].map(v=>[v.id,v])).values()]:[])];
+
   const audioPreparation = useRef(0),
     audioAbort = useRef<AbortController | null>(null);
   function message(error: unknown) {
@@ -280,14 +288,40 @@ export default function App() {
   }
   const { task, tasks } = useTasks(message);
   const audioBusy = tasks.some((x) => /准备|试听/.test(x));
-  function playbackContext(value = dbRef.current) {
-    return fingerprint([
-      value.resources,
-      value.templates,
-      value.settings.voiceId,
-      value.settings.translationVoiceId,
-      value.pronunciations,
-    ]);
+  function playbackContext(value = dbRef.current, owner=sessionMeta.current.collection) {
+    if(owner?.kind==='album')return fingerprint([value.resources,value.pronunciations,value.albums?.find(a=>a.id===owner.id)]);
+    const context:unknown[]=[value.resources,value.templates,value.settings.voiceId,value.settings.translationVoiceId,value.pronunciations];
+    if(owner)context.push(value.playlists.find(p=>p.id===owner.id));
+    return fingerprint(context);
+  }
+  function invalidateCollection(owner:PlaybackCollection){
+    if(sessionMeta.current.collection?.kind===owner.kind&&sessionMeta.current.collection.id===owner.id){stopAudio();setPlan(null);setQueue([]);}
+  }
+  const ownsResume=(v:Library,owner:PlaybackCollection)=>v.resume?.collection?.kind===owner.kind&&v.resume.collection.id===owner.id;
+  async function changePlaylist(id:string,fn:(p:Playlist)=>Playlist){
+    const current=dbRef.current.playlists.find(p=>p.id===id);if(!current)throw new Error('列表已删除');
+    const next=validatePlaylist(fn(current));invalidateCollection({kind:'playlist',id});
+    const value=update(v=>({...v,playlists:v.playlists.map(p=>p.id===id?next:p),resume:ownsResume(v,{kind:'playlist',id})?undefined:v.resume}));
+    await saveLibrary(value);
+  }
+  async function createPlaylist(p:Playlist){const next=validatePlaylist(p);await saveLibrary(update(v=>({...v,playlists:[...v.playlists,next]})));}
+  async function deletePlaylist(id:string){invalidateCollection({kind:'playlist',id});await saveLibrary(update(v=>({...v,playlists:v.playlists.filter(p=>p.id!==id),resume:ownsResume(v,{kind:'playlist',id})?undefined:v.resume})));}
+  async function changeAlbum(id:string,fn:(a:Album)=>Album){
+    const current=dbRef.current.albums?.find(a=>a.id===id);if(!current)throw new Error('专辑已删除');
+    const next=validateAlbum(fn(current));invalidateCollection({kind:'album',id});
+    await saveLibrary(update(v=>({...v,albums:v.albums?.map(a=>a.id===id?next:a),resume:ownsResume(v,{kind:'album',id})?undefined:v.resume})));
+  }
+  async function createAlbum(a:Album){const next=validateAlbum(a);await saveLibrary(update(v=>({...v,albums:[...(v.albums??[]),next]})));}
+  async function deleteAlbum(id:string){invalidateCollection({kind:'album',id});await saveLibrary(update(v=>({...v,albums:v.albums?.filter(a=>a.id!==id),resume:ownsResume(v,{kind:'album',id})?undefined:v.resume})));}
+  async function copyAlbum(p:Playlist){const a:Album={id:uid(),name:p.name,resourceIds:[...p.resourceIds],settings:{...albumDefaults}};await createAlbum(a);setAlbumId(a.id);go('albums');setNotice('已复制曲目顺序；请设置专辑朗读规则。');}
+  async function requestCatalogue(kind:'poetry'|'grammar',accepted=false){
+    if(!accepted&&dbRef.current.consents?.learningResources?.version!==RESOURCE_LICENSE_VERSION){setLicenseKind(kind);return;}
+    await task('读取公开目录',async()=>setRemote(await listRemoteResources(kind,{acceptPersonalUseLicense:true})));
+  }
+  async function acceptResourceLicense(){
+    const kind=licenseKind;if(!kind)return;
+    const value=update(v=>({...v,consents:{...v.consents,learningResources:{version:RESOURCE_LICENSE_VERSION,acceptedAt:new Date().toISOString()}}}));
+    await saveLibrary(value);setLicenseKind(null);await requestCatalogue(kind,true);
   }
   function persistProgress(completed = false, sample?: AudioStatus) {
     if (!livePlanRef.current) return;
@@ -306,6 +340,7 @@ export default function App() {
     const value = update((prev) => ({
       ...prev,
       resume: {
+        collection:sessionMeta.current.collection,
         resourceId: id,
         templateId: sessionMeta.current.templateId??templateRef.current,
         position: s.position,
@@ -350,6 +385,8 @@ export default function App() {
       setDb(data);
       setStorageOK(true);
       if (data.resume) {
+        sessionMeta.current.collection=data.resume.collection;
+        if(data.resume.collection?.kind==='album')setAlbumId(data.resume.collection.id);
         setActiveId(data.resume.resourceId);
         setTemplateId(data.resume.templateId);
         setSelected(data.resume.selectedIds);
@@ -711,9 +748,11 @@ export default function App() {
     },
     resume = false,
     playbackRate = rate,
+    meta:typeof sessionMeta.current = sessionMeta.current,
   ) {
     const resumeMarker=resume?dbRef.current.resume:undefined;
     stopAudio();
+    sessionMeta.current=meta;
     started.current = false;
     setPlan(null);
     livePlanRef.current = null;
@@ -807,14 +846,6 @@ export default function App() {
   ) {
     if (audioBusy) return;
     await task("准备本地音频 · 请保持前台", async () => {
-      setActiveId(resource.id);
-      setTemplateId(chosen.id);
-      sessionMeta.current = {
-        templateId:chosen.id,
-        selectedIds: resource.id === activeId ? selected : undefined,
-        rate: playbackRate,
-      };
-      setQueue([]);
       const p = compileSession(
         [
           {
@@ -827,12 +858,14 @@ export default function App() {
         ],
         { loop, repeat: repeatCount },
       );
-      await playCompiled(p, resume, playbackRate);
+      setActiveId(resource.id);setTemplateId(chosen.id);setQueue([]);
+      await playCompiled(p, resume, playbackRate,{templateId:chosen.id,selectedIds:resource.id===activeId?selected:undefined,rate:playbackRate});
     });
   }
   async function startList(
     ids: string[],
     itemOptions?: Library["playlists"][number]["options"],
+    owner?:PlaybackCollection,
   ) {
     if (audioBusy) return;
     await task("准备完整播放列表 · 缓存完成后可锁屏", async () => {
@@ -845,19 +878,30 @@ export default function App() {
           template:
             allTemplates.find((t) => t.id === options?.templateId) ?? template,
           voiceId: options?.voiceId || db.settings.voiceId || undefined,
-          translationVoiceId: db.settings.translationVoiceId || undefined,
+          translationVoiceId: options?.translationVoiceId || db.settings.translationVoiceId || undefined,
           rate: options?.rate ?? 1,
         };
       });
-      sessionMeta.current = { rate,templateId:entries[0]?.template.id };
+
       setSelected(undefined);
-      const p = compileSession(entries, { loop, repeat: repeatCount, shuffle });
+      const playlist=owner?.kind==='playlist';
+      const p = compileSession(entries, playlist?{loop:false,repeat:1,shuffle:false}:{loop,repeat:repeatCount,shuffle});
+      if(playlist)setRate(1);
       const order = p.steps
         .map((s) => s.resourceId!)
         .filter((id, i, all) => i === 0 || id !== all[i - 1]);
       setActiveId(order[0]);
       setQueue(order.slice(1));
-      await playCompiled(p);
+      await playCompiled(p,false,playlist?1:rate,{rate:playlist?1:rate,templateId:entries[0]?.template.id,collection:owner});
+    });
+  }
+  async function startAlbum(id:string){
+    if(audioBusy)return;
+    await task('准备专辑音频',async()=>{
+      const a=dbRef.current.albums?.find(a=>a.id===id);if(!a)throw new Error('专辑已删除');
+      const p=compileAlbum(a,dbRef.current.resources);
+      setRate(1);setSelected(undefined);setActiveId(p.steps[0].resourceId!);
+      await playCompiled(p,false,1,{rate:1,templateId:`album:${a.id}`,collection:{kind:'album',id:a.id}});
     });
   }
   async function generate(force = false) {
@@ -935,7 +979,7 @@ export default function App() {
     if (
       plan &&
       livePlanRef.current &&
-      plan.steps[statusRef.current.stepIndex]?.resourceId === active.id
+      plan.steps[statusRef.current.stepIndex]?.resourceId === active.id && contextRef.current===playbackContext()
     ) {
       if (stopAt) {
         const seconds = (stopAt - Date.now()) / 1000;
@@ -952,6 +996,7 @@ export default function App() {
     const saved = dbRef.current.resume;
     if (saved)
       sessionMeta.current = {
+        collection:saved.collection,
         templateId:saved.templateId,
         selectedIds: saved.selectedIds,
         rate: saved.rate ?? rate,
@@ -1331,6 +1376,7 @@ export default function App() {
         return (
           <>
             {heading("正在播放")}
+            {plan&&sessionMeta.current.collection?.kind==='album'&&<View style={{marginBottom:20,gap:8}}>{small(`专辑 · ${db.albums?.find(a=>a.id===sessionMeta.current.collection?.id)?.name??'专辑'}`)}{button('专辑设置',()=>{setAlbumId(sessionMeta.current.collection!.id);go('albums');})}</View>}
             <PlayerPage
               active={active}
               resources={resources}
@@ -1373,7 +1419,7 @@ export default function App() {
       case "library":
         return (
           <>
-            {heading("资源", "本机保存，可自由组合。远程资源保留各自的许可。")}
+            {heading("资源", "管理本机资料，或从学习项目导入。")}
             {input(query, setQuery, "搜索全文")}
             <View style={styles.chips}>
               {button("新建文稿", () => edit(), true)}
@@ -1401,57 +1447,12 @@ export default function App() {
               .map(row)}
             {resources.length > listLimit &&
               button("更多资料", () => setListLimit((v) => v + 40))}
-            {section("连接学习项目")}
-            {small(
-              "以下两个项目采用个人非商业许可。下载仅供个人学习；内容不是 MIT 授权教材，不随 Noxia 开源代码分发。",
-            )}
-            {button(
-              consent
-                ? "已同意个人非商业使用许可"
-                : "我已阅读并同意仅作个人非商业学习",
-              () => setConsent(!consent),
-              consent,
-            )}
+            {section("学习项目")}
             <View style={styles.chips}>
-              {button(
-                "查看古诗文许可",
-                () =>
-                  void Linking.openURL(
-                    "https://github.com/XiaoRui114514/poetry-recite/blob/main/LICENSE",
-                  ),
-              )}
-              {button(
-                "查看英语许可",
-                () =>
-                  void Linking.openURL(
-                    "https://github.com/XiaoRui114514/english-grammar-lab/blob/main/LICENSE",
-                  ),
-              )}
+              {button('古诗文目录',()=>void requestCatalogue('poetry'))}
+              {button('英语语法目录',()=>void requestCatalogue('grammar'))}
             </View>
-            <View style={styles.chips}>
-              {button(
-                "古诗文目录",
-                () =>
-                  void task("读取公开目录", async () =>
-                    setRemote(
-                      await listRemoteResources("poetry", {
-                        acceptPersonalUseLicense: consent,
-                      }),
-                    ),
-                  ),
-              )}
-              {button(
-                "英语语法目录",
-                () =>
-                  void task("读取公开目录", async () =>
-                    setRemote(
-                      await listRemoteResources("grammar", {
-                        acceptPersonalUseLicense: consent,
-                      }),
-                    ),
-                  ),
-              )}
-            </View>
+            <ResourceConsent open={licenseKind!==null} onClose={()=>setLicenseKind(null)} onAgree={acceptResourceLicense} colors={c}/>
             {remote
               .filter((r) => r.title.includes(query))
               .map((r) => (
@@ -1470,7 +1471,7 @@ export default function App() {
                     () =>
                       void task("下载并核对对应关系", async () => {
                         const resource = await loadRemoteResource(r, {
-                          acceptPersonalUseLicense: consent,
+                          acceptPersonalUseLicense: dbRef.current.consents?.learningResources?.version===RESOURCE_LICENSE_VERSION,
                         });
                         putResource(resource);
                         setNotice(
@@ -1581,12 +1582,14 @@ export default function App() {
                         playlists: v.playlists.filter((p) =>
                           p.resourceIds.includes(r.id),
                         ),
+                        albums: v.albums?.filter(a => a.resourceIds.includes(r.id)),
                       },
                       ...(v.trash ?? []),
                     ],
                     resume:
                       v.resume?.resourceId === r.id ? undefined : v.resume,
                     resources: v.resources.filter((x) => x.id !== r.id),
+                    albums:v.albums?.map(a=>removeResource(a,r.id)),
                     playlists: v.playlists.map((p) => ({
                       ...p,
                       resourceIds: p.resourceIds.filter((id) => id !== r.id),
@@ -1775,184 +1778,9 @@ export default function App() {
           </>
         );
       case "playlists":
-        return (
-          <>
-            {heading("播放列表", "选择内容与播放顺序")}
-            {input(playlistName, setPlaylistName, "新播放列表名称")}
-            {button(
-              "创建列表",
-              () => {
-                if (!playlistName.trim()) return;
-                const id = uid();
-                update((v) => ({
-                  ...v,
-                  playlists: [
-                    ...v.playlists,
-                    { id, name: playlistName.trim(), resourceIds: [] },
-                  ],
-                }));
-                setPlaylistId(id);
-                setPlaylistName("");
-              },
-              true,
-            )}
-            <View style={styles.chips}>
-              {db.playlists.map((p) =>
-                button(
-                  `${p.name} (${p.resourceIds.length})`,
-                  () => setPlaylistId(p.id),
-                  playlistId === p.id,
-                ),
-              )}
-            </View>
-            {db.playlists
-              .filter((p) => p.id === playlistId)
-              .map((p) => (
-                <View key={p.id}>
-                  {section(p.name)}
-                  {resources.map((r) => (
-                    <View
-                      key={r.id}
-                      style={[
-                        styles.resourceRow,
-                        { borderBottomColor: c.line },
-                      ]}
-                    >
-                      <Text style={{ color: c.text, flex: 1 }}>{r.title}</Text>
-                      {button(
-                        p.resourceIds.includes(r.id) ? "移出" : "加入",
-                        () =>
-                          update((v) => ({
-                            ...v,
-                            playlists: v.playlists.map((x) =>
-                              x.id === p.id
-                                ? {
-                                    ...x,
-                                    resourceIds: x.resourceIds.includes(r.id)
-                                      ? x.resourceIds.filter(
-                                          (id) => id !== r.id,
-                                        )
-                                      : [...x.resourceIds, r.id],
-                                  }
-                                : x,
-                            ),
-                          })),
-                      )}
-                    </View>
-                  ))}
-                  {section("单篇设置")}
-                  <View style={styles.chips}>
-                    {p.resourceIds.map((id) =>
-                      button(
-                        resources.find((r) => r.id === id)?.title ?? id,
-                        () => setItemEditId(id),
-                        itemEditId === id,
-                      ),
-                    )}
-                  </View>
-                  {p.resourceIds.includes(itemEditId) && (
-                    <View>
-                      <View style={styles.chips}>
-                        {allTemplates.map((t) =>
-                          button(
-                            t.name,
-                            () =>
-                              update((v) => ({
-                                ...v,
-                                playlists: v.playlists.map((x) =>
-                                  x.id === p.id
-                                    ? {
-                                        ...x,
-                                        options: {
-                                          ...x.options,
-                                          [itemEditId]: {
-                                            ...x.options?.[itemEditId],
-                                            templateId: t.id,
-                                          },
-                                        },
-                                      }
-                                    : x,
-                                ),
-                              })),
-                            p.options?.[itemEditId]?.templateId === t.id,
-                          ),
-                        )}
-                      </View>
-                      {input(
-                        p.options?.[itemEditId]?.voiceId ?? "",
-                        (voiceId) =>
-                          update((v) => ({
-                            ...v,
-                            playlists: v.playlists.map((x) =>
-                              x.id === p.id
-                                ? {
-                                    ...x,
-                                    options: {
-                                      ...x.options,
-                                      [itemEditId]: {
-                                        ...x.options?.[itemEditId],
-                                        voiceId,
-                                      },
-                                    },
-                                  }
-                                : x,
-                            ),
-                          })),
-                        "此篇音色 ID（留空使用默认）",
-                      )}
-                      {input(
-                        String(p.options?.[itemEditId]?.rate ?? 1),
-                        (rate) =>
-                          update((v) => ({
-                            ...v,
-                            playlists: v.playlists.map((x) =>
-                              x.id === p.id
-                                ? {
-                                    ...x,
-                                    options: {
-                                      ...x.options,
-                                      [itemEditId]: {
-                                        ...x.options?.[itemEditId],
-                                        rate: Number(rate),
-                                      },
-                                    },
-                                  }
-                                : x,
-                            ),
-                          })),
-                        "此篇语速倍率 0.25—2",
-                      )}
-                    </View>
-                  )}
-                  <View style={styles.chips}>
-                    {button(
-                      "播放列表",
-                      () => {
-                        if (!p.resourceIds.length) {
-                          setNotice("请先加入文稿");
-                          return;
-                        }
-                        void startList(p.resourceIds, p.options);
-                      },
-                      true,
-                    )}
-                    {button("加入待播队列", () =>
-                      setQueue((v) => [...v, ...p.resourceIds]),
-                    )}
-                    {button("删除列表", () =>
-                      update((v) => ({
-                        ...v,
-                        playlists: v.playlists.filter((x) => x.id !== p.id),
-                      })),
-                    )}
-                  </View>
-                </View>
-              ))}
-            {small(
-              "整个列表一次准备，支持随机顺序、有限次数和循环。每篇可独立设置编排、原文音色与语速。实际后台连续播放仍需 iPad 验收。",
-            )}
-          </>
-        );
+        return <PlaylistPage lists={db.playlists} resources={resources} templates={allTemplates} voices={collectionVoices} colors={c} onChange={changePlaylist} onCreate={createPlaylist} onDelete={deletePlaylist} onPlay={p=>void startList(p.resourceIds,p.options,{kind:'playlist',id:p.id})} onEnqueue={ids=>{setQueue(v=>[...v,...ids]);setNotice('已加入待播队列；在播放器准备队列后生效。');}} onAlbum={p=>void task('创建专辑副本',()=>copyAlbum(p))}/>;
+      case "albums":
+        return <AlbumPage albums={db.albums??[]} preferredId={albumId} onSelect={setAlbumId} resources={resources} voices={collectionVoices} colors={c} onCreate={createAlbum} onChange={changeAlbum} onDelete={deleteAlbum} onPlay={a=>void startAlbum(a.id)} busy={audioBusy} onVoices={()=>go('voices')}/>;
       case "history":
         return (
           <>

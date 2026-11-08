@@ -178,3 +178,10 @@ describe('foreground browser speech preview', () => {
     await expect(audio.prepare(plan())).rejects.toThrow('不能朗读');
   });
 });
+
+describe('album pass progress',()=>{
+ it('reports a consistent step position immediately after speech completion',async()=>{
+  vi.useFakeTimers();const utterances: Array<{onend?:()=>void}>=[];vi.stubGlobal('window',{speechSynthesis:{getVoices:()=>[],cancel(){},pause(){},resume(){},speak(u:any){utterances.push(u);}}});vi.stubGlobal('SpeechSynthesisUtterance',class{constructor(public text:string){}});
+  const audio=createWebAudio();try{const p=plan();p.steps=p.steps.filter(s=>s.kind==='speech');await audio.prepare(p);audio.play();utterances[0].onend?.();const s=audio.getStatus();expect(s.stepIndex).toBe(1);expect(s.position).toBeGreaterThan(0);}finally{audio.stop();vi.useRealTimers();vi.unstubAllGlobals();}
+ });
+});

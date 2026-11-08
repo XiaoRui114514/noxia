@@ -103,3 +103,14 @@ it('reports write errors and permits a later save without losing the pending con
  const pending=saveLibrary(freshLibrary()),rejected=expect(pending).rejects.toThrow('disk full');await expect(flushLibrary()).rejects.toThrow('disk full');await rejected;
  const retry=saveLibrary({...freshLibrary(),resources:[resource as any]});await flushLibrary();await retry;expect((await loadLibrary()).resources[0].title).toBe('valid');
 });
+
+it('migrates schema 2 with an exact backup and preserves lists, albums and acknowledgement on reload/restore',async()=>{
+ const {albumDefaults}=await import('../core/albums');const {V2_BACKUP_KEY,LIBRARY_SCHEMA}=await import('./storage');
+ const old=JSON.stringify({...freshLibrary(),schema:2,playlists:[{id:'p',name:'旧列表',resourceIds:['b','a'],options:{b:{rate:1.25}}}]});store.set(LIBRARY_KEY,old);const migrated=await loadLibrary();expect(store.get(V2_BACKUP_KEY)).toBe(old);expect(migrated.playlists[0].resourceIds).toEqual(['b','a']);
+ const value={...migrated,albums:[{id:'album',name:'专辑',resourceIds:['b','a'],settings:{...albumDefaults}}],consents:{learningResources:{version:1,acceptedAt:'2026-11-08T00:00:00Z'}}};const p=saveLibrary(value);await flushLibrary();await p;expect(JSON.parse(store.get(LIBRARY_KEY)!).schema).toBe(LIBRARY_SCHEMA);expect((await loadLibrary()).albums).toEqual(value.albums);expect((await loadLibrary()).consents).toEqual(value.consents);
+ const restored=await restoreLibrary(exportLibrary(value));expect(restored.albums).toEqual(value.albums);expect(restored.playlists).toEqual(value.playlists);
+});
+it('quarantines an invalid album while retaining valid lists and album raw data',async()=>{
+ const {albumDefaults}=await import('../core/albums');const bad={id:'bad',name:'bad',resourceIds:['r'],settings:{...albumDefaults,rate:0}};
+ const value=parseLibrary(JSON.stringify({...freshLibrary(),schema:3,resources:[resource],playlists:[{id:'p',name:'p',resourceIds:['r']}],albums:[bad,{...bad,id:'good',settings:albumDefaults}]}));expect(value.albums?.map(a=>a.id)).toEqual(['good']);expect(value.playlists).toHaveLength(1);expect(value.quarantine?.find(q=>q.collection==='albums')?.raw).toEqual(bad);
+});

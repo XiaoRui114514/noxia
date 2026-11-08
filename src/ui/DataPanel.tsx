@@ -17,6 +17,7 @@ import {
   readRecoveryBackup,
   restoreLibrary,
 } from "../services/storage";
+import { restoreResourceLink } from "../core/collections";
 import { restorePlaylistLink } from "../core/libraryOperations";
 import { validateResource } from "../core";
 import { ModelSettingsColors } from "./ModelSettings";
@@ -96,7 +97,7 @@ export function DataPanel({
         数据
       </Text>
       {hint(
-        `${db.resources.length} 篇资料 · ${db.trash?.length ?? 0} 篇回收站 · ${db.quarantine?.length ?? 0} 条异常`,
+        `${db.resources.length} 篇资料 · ${db.albums?.length ?? 0} 张专辑 · ${db.trash?.length ?? 0} 篇回收站 · ${db.quarantine?.length ?? 0} 条异常`,
       )}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         {button("整库备份", () => run(() => download(exportLibrary(db))))}
@@ -131,7 +132,7 @@ export function DataPanel({
         )}
       </View>
       {hint(
-        "恢复前自动保存当前原文。备份包含资料、模板、词典、复习和进度，不含密钥及音频。",
+        "恢复前自动保存当前原文。备份包含资料、列表、专辑、模板、词典、复习和进度，不含密钥及音频。",
       )}
       <TextInput
         accessibilityLabel="备份或修复 JSON"
@@ -194,7 +195,7 @@ export function DataPanel({
       </View>
       {preview &&
         hint(
-          `将恢复 ${preview.resources.length} 篇、${preview.templates.length} 个模板；隔离 ${preview.quarantine?.length ?? 0} 条。当前资料库将替换。`,
+          `将恢复 ${preview.resources.length} 篇、${preview.templates.length} 个模板、${preview.albums?.length ?? 0} 张专辑；隔离 ${preview.quarantine?.length ?? 0} 条。当前资料库将替换。`,
         )}
       {(db.quarantine ?? []).map((q) => (
         <View key={q.id} style={{ gap: 8, paddingVertical: 10 }}>
@@ -222,6 +223,12 @@ export function DataPanel({
               ...db,
               resources: [item.resource, ...db.resources],
               trash: db.trash?.filter((_, j) => i !== j),
+              albums: db.albums?.map((a) => {
+                const before = item.albums?.find((x) => x.id === a.id);
+                return before
+                  ? restoreResourceLink(a, before, item.resource.id)
+                  : a;
+              }),
               playlists: db.playlists.map((p) => {
                 const before = item.playlists.find((x) => x.id === p.id);
                 return before
@@ -229,7 +236,7 @@ export function DataPanel({
                   : p;
               }),
             });
-            report("已恢复文稿及列表关联");
+            report("已恢复文稿及列表、专辑关联");
           })}
         </View>
       ))}

@@ -10,7 +10,7 @@ const config: ExpoConfig = {
   userInterfaceStyle: "automatic",
   ios: {
     supportsTablet: true,
-    buildNumber: "3",
+    buildNumber: "4",
     bundleIdentifier: "com.noxia.app",
     infoPlist: {
       UIBackgroundModes: ["audio"],

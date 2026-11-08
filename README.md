@@ -6,7 +6,16 @@
 
 截图来自浏览器预览。新增 [账号弹窗](docs/screenshots/account-dialog.png)、[自评复习](docs/screenshots/review-landscape.png)。另见 [首页](docs/screenshots/home-landscape.png)、[设置](docs/screenshots/settings-landscape.png)、[竖屏](docs/screenshots/player-portrait.png)、[窄屏深色](docs/screenshots/player-split-dark.png)。
 
-## 0.3 更新
+## 0.4 更新
+
+- 播放列表按已加入顺序展示和播放；加入、移除、上移、下移分开，连续点击加入不会反向移除。单篇设置先编辑后保存。
+- 新增专辑：保存曲目顺序、原文与译文声音、各自遍数、语速、句间间隔、专辑轮数、随机和循环。支持整篇或逐句，可从列表建立副本。
+- 专辑会话支持暂停和刷新恢复；修改正在播放的曲目或设置会停止旧会话，避免移除后继续读旧内容。备份与回收站恢复包含专辑关联。
+- 资料许可改为首次打开学习项目时弹窗确认，本机记住选择；资源页移除常驻许可说明和按钮。
+
+验证范围见 [0.4 验证记录](docs/review-0.4.md)。[专辑截图](docs/screenshots/albums-landscape.png) · [窄屏设置](docs/screenshots/album-settings-phone.png) · [许可弹窗](docs/screenshots/resource-license-phone.png)。
+
+## 0.3 更新（历史）
 
 - 统一资料保存与读取校验；异常条目单独隔离，保留原文，合法资料继续使用。设置中提供整库备份、恢复预览、恢复点、回收站和版本历史。
 - 编辑保留句段 ID、解释、关键词、重点和段落；提供结构化编辑、人工拆分及合并。文稿草稿自动保存，资料支持全文搜索。
@@ -15,7 +24,7 @@
 - 设置首区保留账号卡片，登录使用自适应弹窗；播放规则默认收起。原译文层级、阅读跟随、文稿保存状态及编排字段重新组织。
 - 新增本机自评、薄弱句、到期复习及每日入口；先揭晓核对再提交，播放完成不计为掌握。
 
-验证范围与未完成事项见 [0.3 验证记录](docs/review-0.3.md)。当前源码版本不代表已交付新版 IPA。
+验证范围与未完成事项见 [0.3 验证记录](docs/review-0.3.md)。0.3.0 已完成 ARM64 真机目标构建并发布 [未签名 IPA](https://github.com/XiaoRui114514/noxia/releases/download/v0.3.0-build3/Noxia-0.3.0.ipa)；不包含本次 0.4 改动。
 
 ## 0.2 更新（历史）
 
@@ -30,7 +39,7 @@
 
 - 输入、编辑、导入 TXT / Markdown，按换行建立朗读单元，用 Tab 明确对应译文。
 - 逐句、逐段、全文编排：原文、译文、解释、关键词、自定义文字、重复和留白；支持保存及导入导出模板。
-- 播放列表、选句、重点句、随机顺序、有限次数、循环、倍速、睡眠截止和渐弱。
+- 有序播放列表、独立专辑、选句、重点句、随机顺序、有限次数、循环、倍速、睡眠截止和渐弱。
 - Apple 系统语音生成本地 PCM，再由原生 AVPlayer 播放完整时间线；跨篇和静音不依赖前台 JavaScript。
 - 古诗文和英语资源适配，按固定来源版本读取，不执行远程 JavaScript，不猜测原文与译文对应。
 - 可编辑的模型讲稿、本机记录和恢复进度。
@@ -112,14 +121,14 @@ npm run check
 
 ```text
 App.tsx / src/ui       页面组合；独立播放、编排、账号、备份、句段和复习组件
-src/core              严格模型验证、编排和跨篇时间线
+src/core              严格模型验证、编排、专辑和跨篇时间线
 src/resources         固定版本资源适配
 src/services          本机保存、接口目录、认证、TTS 与缓存编排
 modules/noxia-audio    Swift 系统语音、文件缓存、AVPlayer、媒体控制
 backend               移动网关、私有身份扩展、SQL 与测试
 ```
 
-版本锁定于 `package-lock.json`：Expo SDK 58 / React Native 0.88.1 / TypeScript 6。[编排](docs/engine.md) · [音频](docs/audio.md) · [本轮复查](docs/review-0.3.md) · [验证记录](docs/status.md)
+版本锁定于 `package-lock.json`：Expo SDK 58 / React Native 0.88.1 / TypeScript 6。[编排](docs/engine.md) · [音频](docs/audio.md) · [本轮复查](docs/review-0.4.md) · [验证记录](docs/status.md)
 
 ## 限制
 

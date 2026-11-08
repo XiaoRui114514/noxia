@@ -134,7 +134,8 @@ test('restricted resources make no network request without acknowledgement; dark
   await openApp(page);
   await navigate(page, '学习资源');
   await page.getByRole('button', { name: '古诗文目录', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('请先阅读来源许可');
+  await expect(page.getByRole('dialog',{name:'资料许可'})).toBeVisible();
+  await page.getByRole('button',{name:'取消',exact:true}).click();
   expect(upstreamRequests).toEqual([]);
   await expect(page.getByRole('button', { name: '下载到本机', exact: true })).toHaveCount(0);
   await navigate(page, '设置与账号');
@@ -219,10 +220,11 @@ test('a saved playlist advances across resources and updates transcript metadata
   await page.getByRole('textbox', { name: '新播放列表名称', exact: true }).fill('一天的两次回想');
   await page.getByRole('button', { name: '创建列表', exact: true }).click();
   for (const material of materials) {
-    await page.getByText(material.title, { exact: true }).locator('..').getByRole('button', { name: '加入', exact: true }).click();
+    await page.getByRole('button', { name: `加入 ${material.title}`, exact: true }).click();
   }
   await page.getByRole('button', { name: materials[1].title, exact: true }).click();
   await page.getByRole('textbox', { name: '此篇语速倍率 0.25—2', exact: true }).fill('1.25');
+  await page.getByRole('button',{name:'保存单篇设置',exact:true}).click();
   await expect.poll(() => page.evaluate(() => {
     const saved = JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}');
     const list = saved.playlists?.[0];

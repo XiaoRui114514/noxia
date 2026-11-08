@@ -69,6 +69,8 @@ export function createWebAudio(): AudioBackend {
   const advance = () => {
     cancel();
     if (!plan) return;
+    status.position=(starts[status.stepIndex]??0)+(durations[status.stepIndex]??0);
+    emit();
     status.stepIndex++;
     elapsed = 0;
     if (status.stepIndex >= plan.steps.length) {
@@ -89,6 +91,7 @@ export function createWebAudio(): AudioBackend {
     const step = plan.steps[status.stepIndex];
     if (!step) return;
     status.playing = true;
+    status.position=(starts[status.stepIndex]??0)+elapsed;
     const token = generation;
     startTimer();
     if (step.kind === 'speech') {

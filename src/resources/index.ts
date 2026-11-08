@@ -23,6 +23,8 @@ export interface Resource {
   reviewUrl?: string;
 }
 
+/** Increment when the acknowledgement terms change. */
+export const RESOURCE_LICENSE_VERSION=1;
 export type RemoteKind = "poetry" | "grammar";
 export interface ResourceEntry {
   id: string;

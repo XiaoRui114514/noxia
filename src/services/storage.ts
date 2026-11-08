@@ -7,15 +7,10 @@ import {
   type Resource,
   type Template,
 } from "../core";
-export type Playlist = {
-  id: string;
-  name: string;
-  resourceIds: string[];
-  options?: Record<
-    string,
-    { templateId?: string; voiceId?: string; rate?: number }
-  >;
-};
+import { validatePlaylist, type Playlist } from "../core/collections";
+import { validateAlbum, type Album } from "../core/albums";
+export type { Playlist } from "../core/collections";
+export type PlaybackCollection = { kind: "playlist" | "album"; id: string };
 export type History = {
   resourceId: string;
   title: string;
@@ -31,6 +26,7 @@ export type Settings = {
   dark: "system" | "light" | "dark";
 };
 export type Resume = {
+  collection?: PlaybackCollection;
   resourceId: string;
   templateId: string;
   position: number;
@@ -52,6 +48,7 @@ export type TrashEntry = {
   resource: Resource;
   deletedAt: string;
   playlists: Playlist[];
+  albums?: Album[];
 };
 export type Review = {
   resourceId: string;
@@ -62,6 +59,8 @@ export type Review = {
   attempts: number;
 };
 export type Library = {
+  albums?: Album[];
+  consents?: { learningResources?: { version: number; acceptedAt: string } };
   resources: Resource[];
   templates: Template[];
   playlists: Playlist[];
@@ -124,6 +123,8 @@ export async function setSecret(key: string, value: string) {
   else await SecureStore.deleteItemAsync(key);
 }
 export const LIBRARY_KEY = "noxia.library.v1";
+export const LIBRARY_SCHEMA = 3;
+export const V2_BACKUP_KEY = "noxia.library.before-migration.v2";
 export const BACKUP_KEY = "noxia.library.before-migration";
 export const RECOVERY_KEY = "noxia.library.before-restore";
 export function freshLibrary(): Library {
@@ -142,7 +143,7 @@ export function parseLibrary(raw: string): Library {
   const v: unknown = JSON.parse(raw);
   if (
     !object(v) ||
-    ![1, 2].includes(v.schema) ||
+    ![1, 2, 3].includes(v.schema) ||
     !["resources", "templates", "playlists", "history"].every((k) =>
       Array.isArray(v[k]),
     )
@@ -153,7 +154,7 @@ export function parseLibrary(raw: string): Library {
     : [];
   function collect<T>(collection: string, validate: (x: unknown) => T): T[] {
     const seen = new Set<string>();
-    return (v as Record<string, any>)[collection].flatMap(
+    return ((v as Record<string, any>)[collection] ?? []).flatMap(
       (raw: unknown, index: number) => {
         try {
           const value = validate(raw);
@@ -183,33 +184,8 @@ export function parseLibrary(raw: string): Library {
   const result: Library = {
     resources: collect("resources", validateResource),
     templates: collect("templates", validateTemplate),
-    playlists: collect("playlists", (x) => {
-      if (
-        !object(x) ||
-        typeof x.id !== "string" ||
-        typeof x.name !== "string" ||
-        !Array.isArray(x.resourceIds) ||
-        x.resourceIds.some((id: unknown) => typeof id !== "string")
-      )
-        throw new Error("列表格式异常");
-      if (
-        x.options &&
-        (!object(x.options) ||
-          Object.values(x.options).some(
-            (o) =>
-              !object(o) ||
-              (o.rate !== undefined &&
-                (!Number.isFinite(o.rate) || o.rate < 0.25 || o.rate > 2)),
-          ))
-      )
-        throw new Error("列表设置异常");
-      return {
-        id: x.id,
-        name: x.name,
-        resourceIds: x.resourceIds,
-        options: x.options,
-      } as Playlist;
-    }),
+    playlists: collect("playlists", validatePlaylist),
+    albums: Array.isArray(v.albums) ? collect("albums", validateAlbum) : [],
     history: collect("history", (x) => {
       if (
         !object(x) ||
@@ -226,6 +202,26 @@ export function parseLibrary(raw: string): Library {
     settings,
     quarantine,
   };
+  if (v.albums !== undefined && !Array.isArray(v.albums))
+    quarantine.push({
+      id: uid(),
+      collection: "albums",
+      raw: v.albums,
+      reason: "专辑格式异常",
+    });
+  if (
+    object(v.consents) &&
+    object(v.consents.learningResources) &&
+    v.consents.learningResources.version === 1 &&
+    typeof v.consents.learningResources.acceptedAt === "string" &&
+    Number.isFinite(Date.parse(v.consents.learningResources.acceptedAt))
+  )
+    result.consents = {
+      learningResources: {
+        version: 1,
+        acceptedAt: v.consents.learningResources.acceptedAt,
+      },
+    };
   if (
     object(v.resume) &&
     typeof v.resume.resourceId === "string" &&
@@ -241,6 +237,7 @@ export function parseLibrary(raw: string): Library {
           resource: validateResource(x.resource),
           deletedAt: String(x.deletedAt),
           playlists: Array.isArray(x.playlists) ? x.playlists : [],
+          albums: Array.isArray(x.albums) ? x.albums.map(validateAlbum) : [],
         },
       ];
     } catch {
@@ -383,21 +380,23 @@ export async function loadLibrary(): Promise<Library> {
   const raw = await AsyncStorage.getItem(LIBRARY_KEY);
   if (!raw) return freshLibrary();
   const data = parseLibrary(raw);
-  if (JSON.parse(raw).schema === 1) {
+  if (JSON.parse(raw).schema < LIBRARY_SCHEMA) {
+    const key = JSON.parse(raw).schema === 2 ? V2_BACKUP_KEY : BACKUP_KEY;
     // Back up the exact bytes before any migration or automatic save.
-    if (!(await AsyncStorage.getItem(BACKUP_KEY)))
-      await AsyncStorage.setItem(BACKUP_KEY, raw);
+    if (!(await AsyncStorage.getItem(key)))
+      await AsyncStorage.setItem(key, raw);
   }
   return data;
 }
 export const exportLibrary = (value: Library) =>
-  JSON.stringify({ ...value, schema: 2 }, null, 2);
+  JSON.stringify({ ...value, schema: LIBRARY_SCHEMA }, null, 2);
 export async function readRawLibrary() {
   return (await AsyncStorage.getItem(LIBRARY_KEY)) ?? "";
 }
 export async function readRecoveryBackup() {
   return (
     (await AsyncStorage.getItem(RECOVERY_KEY)) ??
+    (await AsyncStorage.getItem(V2_BACKUP_KEY)) ??
     (await AsyncStorage.getItem(BACKUP_KEY)) ??
     ""
   );

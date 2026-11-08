@@ -2,6 +2,8 @@
 
 2026-11-07（北京时间）。基线 `1e6245731fdd67c200f2523df3a725130b6c2ff5`；开始时 `git status` 和 `git diff` 为空。已读 AGENTS、README 及当前实现。继续沿用 Expo / React Native，无新增依赖，无生产部署。
 
+构建补记（2026-11-08）：0.3.0 build 3 后续已通过 [GitHub Actions ARM64 真机目标构建](https://github.com/XiaoRui114514/noxia/actions/runs/42384144475)，并发布 [未签名 IPA](https://github.com/XiaoRui114514/noxia/releases/download/v0.3.0-build3/Noxia-0.3.0.ipa)。下文“本轮未构建”描述最初本地验证时点；模拟器和实体设备验收仍未完成。0.4 的新改动另见 [0.4 记录](review-0.4.md)。
+
 ## 已修复
 
 1. 编辑、文件导入、生成稿和资源写入均经过 `validateResource`，读取也使用同一限制：标题 500 字符、原文/译文/解释各 10000 字符、2000 句段、总量 100 万字符。关键词数组累计字符数且统一限制 4000 字符。超限稿保留在编辑区，不写成非法资料。
