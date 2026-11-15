@@ -25,7 +25,7 @@ const config: ExpoConfig = {
   },
   android: { package: "com.noxia.app" },
   web: { bundler: "metro", name: "Noxia" },
-  plugins: ["expo-dev-client", "expo-secure-store", "expo-document-picker"],
+  plugins: ["expo-dev-client", "expo-secure-store", "expo-document-picker", "expo-status-bar"],
   extra: {
     services: { accountApi: process.env.EXPO_PUBLIC_ACCOUNT_API || "" },
   },
