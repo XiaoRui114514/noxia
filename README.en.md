@@ -6,7 +6,7 @@ A listening, recitation and review app built with React Native/Expo and an iOS a
 
 ## Versions and installation
 
-The default `main` branch contains **0.2.0** source. [Published releases](https://github.com/XiaoRui114514/noxia/releases) also contain later 0.3/0.4 IPA builds from separate build/delivery commits; a newer release number does not mean `main` contains that code. Read the selected release's source/build information before developing or reporting a defect.
+The default `main` branch integrates the released **0.4.0** albums, ordered playlists, backup/recovery and self-assessed review code, with the SDK patch updates retained. [Published IPAs](https://github.com/XiaoRui114514/noxia/releases) remain tied to their own source/build commits; a historical package is not a build of the latest `main`. Read that source/build information when reporting a defect.
 
 Download an IPA and its SHA-256 file from the chosen release. These device packages require your own legitimate signing/provisioning before installation; an unsigned IPA is not directly installable. Minimum iOS/iPadOS: 16.4. Simulator ZIPs cannot be installed on a physical device. Releases avoid the short retention period of Actions artifacts.
 

@@ -274,7 +274,7 @@ describe("external audio preparation", () => {
       controller.signal,
     );
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+    expect(fetchMock.mock.calls[0][1].signal).not.toBe(controller.signal);
     controller.abort();
     // Simulate a provider/native fetch implementation delivering a result despite abort.
     pendingResponse.resolve(response());

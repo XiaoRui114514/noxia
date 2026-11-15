@@ -112,7 +112,7 @@ test('a reordered custom recall template is saved and restored', async ({ page }
   await page.getByRole('textbox', { name: '次数', exact: true }).fill('2');
   // The first matching button opens the preset; the last one adds a recall step.
   await page.getByRole('button', { name: '留白自背', exact: true }).last().click();
-  await page.getByRole('textbox', { name: '时长', exact: true }).nth(1).fill('7000');
+  await page.getByRole('textbox', { name: '时长', exact: true }).first().fill('7000');
   await page.getByRole('button', { name: '↑', exact: true }).nth(1).click();
   await page.getByRole('button', { name: '保存模板', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText('模板已保存在本机');
@@ -134,7 +134,8 @@ test('restricted resources make no network request without acknowledgement; dark
   await openApp(page);
   await navigate(page, '学习资源');
   await page.getByRole('button', { name: '古诗文目录', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('请先阅读来源许可');
+  await expect(page.getByRole('dialog',{name:'资料许可'})).toBeVisible();
+  await page.getByRole('button',{name:'取消',exact:true}).click();
   expect(upstreamRequests).toEqual([]);
   await expect(page.getByRole('button', { name: '下载到本机', exact: true })).toHaveCount(0);
   await navigate(page, '设置与账号');
@@ -219,10 +220,11 @@ test('a saved playlist advances across resources and updates transcript metadata
   await page.getByRole('textbox', { name: '新播放列表名称', exact: true }).fill('一天的两次回想');
   await page.getByRole('button', { name: '创建列表', exact: true }).click();
   for (const material of materials) {
-    await page.getByText(material.title, { exact: true }).locator('..').getByRole('button', { name: '加入', exact: true }).click();
+    await page.getByRole('button', { name: `加入 ${material.title}`, exact: true }).click();
   }
   await page.getByRole('button', { name: materials[1].title, exact: true }).click();
   await page.getByRole('textbox', { name: '此篇语速倍率 0.25—2', exact: true }).fill('1.25');
+  await page.getByRole('button',{name:'保存单篇设置',exact:true}).click();
   await expect.poll(() => page.evaluate(() => {
     const saved = JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}');
     const list = saved.playlists?.[0];
@@ -238,6 +240,7 @@ test('a saved playlist advances across resources and updates transcript metadata
   await page.getByRole('button', { name: '播放列表', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: '正在播放' })).toBeVisible();
   await expect(page.getByRole('checkbox')).toContainText(materials[0].text);
+  await page.getByRole('button',{name:'播放设置',exact:true}).click();
   await expect(page.getByRole('heading', { name: '待播队列 · 1', exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as Window & { __noxiaPlaylistSpeech?: { spoken: Array<{ text: string }> } }).__noxiaPlaylistSpeech?.spoken[0]?.text)).toBe(materials[0].text);
   // Complete the speech callback, then let the real silence-step clock reach the next work.
@@ -287,10 +290,13 @@ test('model directories load automatically, selection uses the returned catalogu
   expect(modelBox).not.toBeNull();
   expect(accountBox!.y).toBeLessThan(modelBox!.y);
   await expect(page.getByRole('textbox', { name: /网关|gateway|手动输入模型|模型 ID/i })).toHaveCount(0);
-  await expect(page.getByRole('textbox', { name: '用户名', exact: true })).toBeVisible();
-  await expect(page.getByRole('textbox', { name: '用户名', exact: true })).not.toBeEditable();
-  await expect(page.getByLabel('密码', { exact: true })).not.toBeEditable();
-  await expect(page.getByRole('button', { name: '登录', exact: true })).toBeDisabled();
+  await expect(page.getByRole('textbox', { name: '用户名', exact: true })).toHaveCount(0);
+  await page.getByRole('button',{name:'登录入口',exact:true}).click();
+  await expect(page.getByRole('dialog',{name:'账号登录'})).toBeVisible();
+  await expect(page.getByLabel('密码', { exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '登录', exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: '同步', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '上传模板快照', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '读取云端模板', exact: true })).toHaveCount(0);
@@ -305,6 +311,9 @@ test('model directories load automatically, selection uses the returned catalogu
   await page.getByRole('button', { name: '选择模型 example-chat-b', exact: true }).click();
   await expect(page.getByRole('button', { name: '选择模型', exact: true })).toContainText('example-chat-b');
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('noxia.library.v1') ?? '{}').settings?.aiModel)).toBe('example-chat-b');
+  await page.reload();
+  await navigate(page, '设置');
+  await expect(page.getByRole('button', { name: '选择模型', exact: true })).toContainText('example-chat-b');
   await key.fill('noxia-fictional-first-provider-token');
   await expect.poll(() => requests.some(request => request.url === 'https://first-provider.example/v1/models' && request.authorization === 'Bearer noxia-fictional-first-provider-token')).toBe(true);
   await page.getByRole('button', { name: '保存此接口密钥', exact: true }).click();

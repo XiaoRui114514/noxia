@@ -1,3 +1,4 @@
+import { timedSignal, abortable } from "./abort";
 /** TTS has separate credentials and consent from text-generation providers. */
 export type TTSSettings = {
   provider: "system" | "openai-compatible";
@@ -183,17 +184,21 @@ async function serviceFetch(
   signal?: AbortSignal,
 ): Promise<Response> {
   try {
-    return await fetch(`${settings.base}${path}`, {
-      method: body === undefined ? "GET" : "POST",
-      headers: {
-        ...(settings.key ? { Authorization: `Bearer ${settings.key}` } : {}),
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        Accept: body === undefined ? "application/json" : "audio/mpeg",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      redirect: "error",
-      signal: signal ?? AbortSignal.timeout(90000),
-    });
+    if (signal?.aborted) throw new Error("已取消");
+    return await abortable(
+      fetch(`${settings.base}${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          ...(settings.key ? { Authorization: `Bearer ${settings.key}` } : {}),
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          Accept: body === undefined ? "application/json" : "audio/mpeg",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        redirect: "error",
+        signal,
+      }),
+      signal,
+    );
   } catch {
     throw new Error("语音服务连接失败或超时，请检查地址和网络");
   }
@@ -202,6 +207,7 @@ async function serviceFetch(
 async function boundedBytes(
   response: Response,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const declaredLength = Number(response.headers.get("content-length"));
   if (declaredLength > limit) throw new Error("语音服务返回内容过大");
@@ -211,7 +217,7 @@ async function boundedBytes(
     let length = 0;
     try {
       while (true) {
-        const chunk = await reader.read();
+        const chunk = await abortable(reader.read(), signal);
         if (chunk.done) break;
         length += chunk.value.length;
         if (length > limit) {
@@ -221,6 +227,7 @@ async function boundedBytes(
         chunks.push(chunk.value);
       }
     } finally {
+      if (signal?.aborted) void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
     const result = new Uint8Array(length);
@@ -232,7 +239,9 @@ async function boundedBytes(
     return result;
   }
   // React Native implementations may expose arrayBuffer but no ReadableStream.
-  const result = new Uint8Array(await response.arrayBuffer());
+  const result = new Uint8Array(
+    await abortable(response.arrayBuffer(), signal),
+  );
   if (result.length > limit) throw new Error("语音服务返回内容过大");
   return result;
 }
@@ -278,38 +287,54 @@ export async function listTTSVoices(
     model: settings.model || "list-only",
     voice: settings.voice || "list-only",
   });
-  for (const path of ["/audio/voices", "/voices"]) {
-    const response = await serviceFetch(valid, path);
-    if (response.status === 404 || response.status === 405) continue;
-    if (!response.ok)
-      throw new Error(`声音列表返回 ${response.status}，请检查权限或服务文档`);
-    let data: unknown;
-    try {
-      const bytes = await boundedBytes(response, MAX_VOICE_BYTES);
-      // Response JSON decoding works in native runtimes without a global TextDecoder.
-      data = await new Response(bytes.buffer as ArrayBuffer).json();
-    } catch {
-      throw new Error("声音列表格式无效或过大，请手动填写声音 ID");
-    }
-    const source = Array.isArray(data)
-      ? data
-      : isRecord(data)
-        ? (data.voices ?? data.data)
-        : undefined;
-    if (!Array.isArray(source))
-      throw new Error("声音列表格式无效，请手动填写声音 ID");
-    const seen = new Set<string>();
-    const voices: TTSVoice[] = [];
-    for (const item of source.slice(0, 1000)) {
-      const voice = voiceMetadata(item);
-      if (voice && !seen.has(voice.id)) {
-        voices.push(voice);
-        seen.add(voice.id);
+  const lifetime = timedSignal(undefined, 20000);
+  try {
+    for (const path of ["/audio/voices", "/voices"]) {
+      const response = await serviceFetch(
+        valid,
+        path,
+        undefined,
+        lifetime.signal,
+      );
+      if (response.status === 404 || response.status === 405) continue;
+      if (!response.ok)
+        throw new Error(
+          `声音列表返回 ${response.status}，请检查权限或服务文档`,
+        );
+      let data: unknown;
+      try {
+        const bytes = await boundedBytes(
+          response,
+          MAX_VOICE_BYTES,
+          lifetime.signal,
+        );
+        // Response JSON decoding works in native runtimes without a global TextDecoder.
+        data = await new Response(bytes.buffer as ArrayBuffer).json();
+      } catch {
+        throw new Error("声音列表格式无效或过大，请手动填写声音 ID");
       }
+      const source = Array.isArray(data)
+        ? data
+        : isRecord(data)
+          ? (data.voices ?? data.data)
+          : undefined;
+      if (!Array.isArray(source))
+        throw new Error("声音列表格式无效，请手动填写声音 ID");
+      const seen = new Set<string>();
+      const voices: TTSVoice[] = [];
+      for (const item of source.slice(0, 1000)) {
+        const voice = voiceMetadata(item);
+        if (voice && !seen.has(voice.id)) {
+          voices.push(voice);
+          seen.add(voice.id);
+        }
+      }
+      return { voices, supported: true };
     }
-    return { voices, supported: true };
+    return { voices: [], supported: false };
+  } finally {
+    lifetime.dispose();
   }
-  return { voices: [], supported: false };
 }
 
 /** Caller checks saved cache first. One explicit consent is required per service base. */
@@ -327,44 +352,49 @@ export async function synthesizeSpeech(
     ttsBase(consent.base) !== valid.base
   )
     throw new Error("请先确认将文字发送到所选语音服务及其可能的费用");
-  const response = await serviceFetch(
-    valid,
-    "/audio/speech",
-    {
-      model: valid.model,
-      input: input.text,
-      voice: input.voice,
-      response_format: "mp3",
-      speed: input.rate,
-    },
-    signal,
-  );
-  if (!response.ok)
-    throw new Error(
-      `语音服务返回 ${response.status}，请检查权限、额度、模型与声音 ID`,
-    );
-  let bytes: Uint8Array;
+  const lifetime = timedSignal(signal);
   try {
-    bytes = await boundedBytes(response, MAX_AUDIO_BYTES);
-  } catch {
-    throw new Error("音频下载失败或超过大小限制，请重试较短文字");
-  }
-  const contentType = response.headers
-    .get("content-type")
-    ?.split(";")[0]
-    .trim()
-    .toLowerCase();
-  if (
-    contentType &&
-    !["audio/mpeg", "audio/mp3", "application/octet-stream"].includes(
-      contentType,
+    const response = await serviceFetch(
+      valid,
+      "/audio/speech",
+      {
+        model: valid.model,
+        input: input.text,
+        voice: input.voice,
+        response_format: "mp3",
+        speed: input.rate,
+      },
+      lifetime.signal,
+    );
+    if (!response.ok)
+      throw new Error(
+        `语音服务返回 ${response.status}，请检查权限、额度、模型与声音 ID`,
+      );
+    let bytes: Uint8Array;
+    try {
+      bytes = await boundedBytes(response, MAX_AUDIO_BYTES, lifetime.signal);
+    } catch {
+      throw new Error("音频下载失败或超过大小限制，请重试较短文字");
+    }
+    const contentType = response.headers
+      .get("content-type")
+      ?.split(";")[0]
+      .trim()
+      .toLowerCase();
+    if (
+      contentType &&
+      !["audio/mpeg", "audio/mp3", "application/octet-stream"].includes(
+        contentType,
+      )
     )
-  )
-    throw new Error("语音服务未返回 MP3 音频，请检查接口兼容性");
-  // Reject JSON/HTML/error text even when a provider labels it as binary audio.
-  const id3 = bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33;
-  const frame = bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
-  if (bytes.length < 4 || (!id3 && !frame))
-    throw new Error("语音服务返回的音频无效或格式不受支持");
-  return { bytes, mimeType: "audio/mpeg", extension: "mp3" };
+      throw new Error("语音服务未返回 MP3 音频，请检查接口兼容性");
+    // Reject JSON/HTML/error text even when a provider labels it as binary audio.
+    const id3 = bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33;
+    const frame = bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+    if (bytes.length < 4 || (!id3 && !frame))
+      throw new Error("语音服务返回的音频无效或格式不受支持");
+    return { bytes, mimeType: "audio/mpeg", extension: "mp3" };
+  } finally {
+    lifetime.dispose();
+  }
 }

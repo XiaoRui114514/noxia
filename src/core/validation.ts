@@ -1,5 +1,5 @@
 import { Resource, Step, StepKind, Template, stepKinds } from './types';
-import { AUDIO_LIMITS } from './limits';
+import { AUDIO_LIMITS, RESOURCE_LIMITS } from './limits';
 
 export class ValidationError extends Error {
   constructor(message: string) { super(message); this.name = 'ValidationError'; }
@@ -74,9 +74,9 @@ export function validateTemplate(value: unknown): Template {
 export function validateResource(value: unknown): Resource {
   if (!record(value)) throw new ValidationError('学习材料须为对象');
   const id = boundedString(value.id, '材料 ID', 300);
-  const title = boundedString(value.title, '材料标题', 500);
+  const title = boundedString(value.title, '材料标题', RESOURCE_LIMITS.title);
   if (!['poetry', 'grammar', 'custom'].includes(String(value.kind))) throw new ValidationError('材料类型无效');
-  if (!Array.isArray(value.segments) || !value.segments.length || value.segments.length > 2000) {
+  if (!Array.isArray(value.segments) || !value.segments.length || value.segments.length > RESOURCE_LIMITS.segments) {
     throw new ValidationError('材料须包含 1–2000 个已对应的句段');
   }
   const ids = new Set<string>();
@@ -93,9 +93,11 @@ export function validateResource(value: unknown): Resource {
     if (Array.isArray(raw.keywords)) {
       if (raw.keywords.length > 100) throw new ValidationError('关键词过多');
       keywords = raw.keywords.map(k => boundedString(k, '关键词', 1000));
-    } else if (raw.keywords !== undefined) keywords = boundedString(raw.keywords, '关键词', 4000, true);
-    characters += original.length + (translation?.length ?? 0) + (explanation?.length ?? 0) + (keywords?.length ?? 0);
-    if (characters > 1000000) throw new ValidationError('材料超过 100 万字符，请分批导入');
+    } else if (raw.keywords !== undefined) keywords = boundedString(raw.keywords, '关键词', RESOURCE_LIMITS.keywordCharacters, true);
+    const keywordCharacters = Array.isArray(keywords) ? keywords.reduce((n, k) => n + k.length, 0) : keywords?.length ?? 0;
+    if (keywordCharacters > RESOURCE_LIMITS.keywordCharacters) throw new ValidationError('关键词最多 4000 字符');
+    characters += original.length + (translation?.length ?? 0) + (explanation?.length ?? 0) + keywordCharacters;
+    if (characters > RESOURCE_LIMITS.characters) throw new ValidationError('材料超过 100 万字符，请分批导入');
     if (raw.important !== undefined && typeof raw.important !== 'boolean') throw new ValidationError('重点标记无效');
     const paragraph = raw.paragraph === undefined ? undefined : number(raw.paragraph, '段落序号', 0, 100000, true);
     return { id, original, translation, explanation, keywords, important: raw.important as boolean | undefined, paragraph };

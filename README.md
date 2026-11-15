@@ -5,9 +5,29 @@
 
 ![播放器](docs/screenshots/player-landscape.png)
 
-截图来自浏览器预览。另见 [首页](docs/screenshots/home-landscape.png)、[设置](docs/screenshots/settings-landscape.png)、[竖屏](docs/screenshots/player-portrait.png)、[窄屏深色](docs/screenshots/player-split-dark.png)。
+截图来自浏览器预览。新增 [账号弹窗](docs/screenshots/account-dialog.png)、[自评复习](docs/screenshots/review-landscape.png)。另见 [首页](docs/screenshots/home-landscape.png)、[设置](docs/screenshots/settings-landscape.png)、[竖屏](docs/screenshots/player-portrait.png)、[窄屏深色](docs/screenshots/player-split-dark.png)。
 
-## 0.2 更新
+## 0.4 更新
+
+- 播放列表按已加入顺序展示和播放；加入、移除、上移、下移分开，连续点击加入不会反向移除。单篇设置先编辑后保存。
+- 新增专辑：保存曲目顺序、原文与译文声音、各自遍数、语速、句间间隔、专辑轮数、随机和循环。支持整篇或逐句，可从列表建立副本。
+- 专辑会话支持暂停和刷新恢复；修改正在播放的曲目或设置会停止旧会话，避免移除后继续读旧内容。备份与回收站恢复包含专辑关联。
+- 资料许可改为首次打开学习项目时弹窗确认，本机记住选择；资源页移除常驻许可说明和按钮。
+
+验证范围见 [0.4 验证记录](docs/review-0.4.md)。[专辑截图](docs/screenshots/albums-landscape.png) · [窄屏设置](docs/screenshots/album-settings-phone.png) · [许可弹窗](docs/screenshots/resource-license-phone.png)。
+
+## 0.3 更新（历史）
+
+- 统一资料保存与读取校验；异常条目单独隔离，保留原文，合法资料继续使用。设置中提供整库备份、恢复预览、恢复点、回收站和版本历史。
+- 编辑保留句段 ID、解释、关键词、重点和段落；提供结构化编辑、人工拆分及合并。文稿草稿自动保存，资料支持全文搜索。
+- 同会话直接续播；刷新后恢复完整时间线，按编排、资源及步骤校验进度。重点筛选为空时明确提示。
+- 词典持久保存；生成任务去重、停止、归属检查、草稿和最近十次历史；固定截止与相对定时分开。
+- 设置首区保留账号卡片，登录使用自适应弹窗；播放规则默认收起。原译文层级、阅读跟随、文稿保存状态及编排字段重新组织。
+- 新增本机自评、薄弱句、到期复习及每日入口；先揭晓核对再提交，播放完成不计为掌握。
+
+验证范围与未完成事项见 [0.3 验证记录](docs/review-0.3.md)。0.3.0 已完成 ARM64 真机目标构建并发布 [未签名 IPA](https://github.com/XiaoRui114514/noxia/releases/download/v0.3.0-build3/Noxia-0.3.0.ipa)；不包含本次 0.4 改动。
+
+## 0.2 更新（历史）
 
 - 黑白主题；导航和浮动播放器采用玻璃材质。iOS 26 使用原生 Liquid Glass，旧版 iOS 使用模糊材质；减少透明度时使用实底。
 - 侧栏按可用空间收起，可手动开关；窄屏导航有遮罩，切换页面、旋转、调整窗口或按 Escape 后关闭。
@@ -20,16 +40,16 @@
 
 - 输入、编辑、导入 TXT / Markdown，按换行建立朗读单元，用 Tab 明确对应译文。
 - 逐句、逐段、全文编排：原文、译文、解释、关键词、自定义文字、重复和留白；支持保存及导入导出模板。
-- 播放列表、选句、重点句、随机顺序、有限次数、循环、倍速、睡眠截止和渐弱。
+- 有序播放列表、独立专辑、选句、重点句、随机顺序、有限次数、循环、倍速、睡眠截止和渐弱。
 - Apple 系统语音生成本地 PCM，再由原生 AVPlayer 播放完整时间线；跨篇和静音不依赖前台 JavaScript。
 - 古诗文和英语资源适配，按固定来源版本读取，不执行远程 JavaScript，不猜测原文与译文对应。
 - 可编辑的模型讲稿、本机记录和恢复进度。
 
 ## 安装包
 
-推荐从 [Releases](https://github.com/XiaoRui114514/noxia/releases) 下载所需版本的 IPA 和 SHA-256 校验文件，避免 Actions 临时产物过期。**当前 `main` 源码为 0.2.0；已发布的 0.3/0.4 来自独立构建与交付提交。** 请以所选 Release 的来源提交和构建说明核对版本，不把较新安装包当作 `main` 构建结果。安装仍需使用自己的合法签名方式，发布包不代表真机后台播放已验收。
+推荐从 [Releases](https://github.com/XiaoRui114514/noxia/releases) 下载所需版本的 IPA 和 SHA-256 校验文件，避免 Actions 临时产物过期。**当前 `main` 已整合 0.4 的专辑、有序列表、备份恢复与自评复习源码，并保留 SDK 补丁更新。** 已发布 IPA 仍以其 Release 来源提交和校验文件为准，不把历史安装包当作最新源码的构建结果。安装仍需使用自己的合法签名方式，发布包不代表真机后台播放已验收。
 
-以下为 `main` 0.2 的历史构建方式：
+从当前源码构建：
 
 使用 Actions 中的 **Build iPad IPA for personal signing**，在成功运行的 Artifacts 下载 **Noxia-iPad-IPA-to-sign**。解压得到：
 
@@ -39,7 +59,7 @@
 
 请用自己的签名方式签名后安装。构建不使用 Apple ID、证书或签名服务凭据。产物默认保留 7 天，过期可手动 Run workflow 重新生成。
 
-最低 iOS / iPadOS 16.4。模拟器 ZIP 的 SDK 平台不同，不能给实体设备安装。0.2 已通过 [真机目标构建](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176)，[下载产物](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176/artifacts/13572728313)（保留 7 天）。构建成功不等于实体设备播放验收完成。
+最低 iOS / iPadOS 16.4。模拟器 ZIP 的 SDK 平台不同，不能给实体设备安装。历史 0.2 已通过 [真机目标构建](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176)，[下载产物](https://github.com/XiaoRui114514/noxia/actions/runs/42369539176/artifacts/13572728313)（保留 7 天）。构建成功不等于实体设备播放验收完成。
 
 可选的 EAS 签名分发通常需要 Apple Developer Program；TestFlight 还需要 App Store Connect。用户已有签名方式时直接使用上述 IPA，无需先配置 EAS。
 
@@ -105,24 +125,24 @@ npm run check
 ## 架构
 
 ```text
-App.tsx / src/ui       页面、黑白主题、玻璃导航、模型和声音设置
-src/core              严格模型验证、编排和跨篇时间线
+App.tsx / src/ui       页面组合；独立播放、编排、账号、备份、句段和复习组件
+src/core              严格模型验证、编排、专辑和跨篇时间线
 src/resources         固定版本资源适配
 src/services          本机保存、接口目录、认证、TTS 与缓存编排
 modules/noxia-audio    Swift 系统语音、文件缓存、AVPlayer、媒体控制
 backend               移动网关、私有身份扩展、SQL 与测试
 ```
 
-版本锁定于 `package-lock.json`：Expo SDK 58 / React Native 0.88.1 / TypeScript 6。[编排](docs/engine.md) · [音频](docs/audio.md) · [本轮复查](docs/review-0.2.md) · [验证记录](docs/status.md)
+版本锁定于 `package-lock.json`：Expo SDK 58 / React Native 0.88.1 / TypeScript 6。[编排](docs/engine.md) · [音频](docs/audio.md) · [本轮复查](docs/review-0.4.md) · [验证记录](docs/status.md)
 
 ## 限制
 
 - 新版实体设备的锁屏、长时间播放、耳机、中断、多输出、大字体及玻璃效果仍需实机验收。
 - 外部 TTS 已有实现和协议测试，未实连用户的服务；模型和声音质量不作未经试听的保证。
-- 关闭应用后先恢复当前篇；完整列表会话恢复、后台跨篇历史日志仍待完善。
+- 完整时间线恢复已在浏览器语音替身下验证；原生准备、锁屏跨篇和长时间恢复仍待实体设备验收。
 - PDF / OCR、录音 / ASR、端侧模型、真正的多窗口 scene、Android 原生音频尚未实现。
-- 本地采用 AsyncStorage；大量文稿、备份导出、数据库迁移、缓存配额和逐项清理仍待完善。卸载或清除数据可能丢失本机资料。
-- 云端目前只提供模板的显式手动同步入口；未部署账号服务，不宣称已有完整自动同步。
+- 本地采用 AsyncStorage，已加入版本迁移、迁移前备份和合并保存；大量资料的数据库选型、音频缓存配额和逐篇清理仍待实现。卸载前请将备份导出到应用以外。
+- 云端目前只提供模板的显式手动同步入口；协议转换、分页和批次会话绑定已有测试。按账号隔离资料/缓存、离线待传和多设备删除仍未实现，账号服务继续关闭。
 
 ## 许可
 
