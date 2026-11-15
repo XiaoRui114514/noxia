@@ -1,5 +1,6 @@
 # Noxia
 
+[English](README.en.md) · 简体中文
 听读、背诵与复习。支持文稿、译文、重复、留白和知识讲稿。
 
 ![播放器](docs/screenshots/player-landscape.png)
@@ -25,6 +26,10 @@
 - 可编辑的模型讲稿、本机记录和恢复进度。
 
 ## 安装包
+
+推荐从 [Releases](https://github.com/XiaoRui114514/noxia/releases) 下载所需版本的 IPA 和 SHA-256 校验文件，避免 Actions 临时产物过期。**当前 `main` 源码为 0.2.0；已发布的 0.3/0.4 来自独立构建与交付提交。** 请以所选 Release 的来源提交和构建说明核对版本，不把较新安装包当作 `main` 构建结果。安装仍需使用自己的合法签名方式，发布包不代表真机后台播放已验收。
+
+以下为 `main` 0.2 的历史构建方式：
 
 使用 Actions 中的 **Build iPad IPA for personal signing**，在成功运行的 Artifacts 下载 **Noxia-iPad-IPA-to-sign**。解压得到：
 
