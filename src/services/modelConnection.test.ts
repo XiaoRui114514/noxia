@@ -310,3 +310,16 @@ describe("endpoint-scoped model connection", () => {
     expect(listModels).toHaveBeenCalledTimes(1);
   });
 });
+
+it("preserves a saved model when asynchronous storage hydration follows an empty initial render", async () => {
+  const { manager, base, callbacks } = setup();
+  manager.updateBase("");
+  manager.updateBase(base, "two");
+  manager.setEnabled(true);
+  await flush();
+  await vi.advanceTimersByTimeAsync(700);
+  expect(manager.settings?.model).toBe("two");
+  expect(callbacks.onModelChange).not.toHaveBeenCalledWith("");
+  manager.changeBase("https://changed.example/v1");
+  expect(callbacks.onModelChange).toHaveBeenLastCalledWith("");
+});

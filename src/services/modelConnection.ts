@@ -112,12 +112,11 @@ export class ModelConnectionManager {
     }
   }
   changeBase = (value: string) => {
-    this.updateBase(value);
+    this.updateBase(value, "", true);
     this.callbacks.onBaseChange(value);
   };
-  updateBase(value: string, initialModel = "") {
+  updateBase(value: string, initialModel = "", userChange = false) {
     if (this.rawBase === value) return;
-    const first = this.rawBase === null;
     const base = canonicalModelBase(value);
     this.rawBase = value;
     // A trailing slash/host case edit still denotes the same trusted endpoint.
@@ -129,10 +128,10 @@ export class ModelConnectionManager {
       ...initial(),
       base,
       status: value.trim() ? "hydrating" : "idle",
-      selectedModel: first ? initialModel : "",
+      selectedModel: !userChange ? initialModel : "",
     });
     this.callbacks.onKeyChange("");
-    if (!first) this.callbacks.onModelChange("");
+    if (userChange) this.callbacks.onModelChange("");
     if (!base) {
       if (value.trim()) {
         let error = "请填写有效的 HTTPS /v1 地址";
